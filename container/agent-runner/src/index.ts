@@ -190,7 +190,10 @@ function createPreCompactHook(assistantName?: string): HookCallback {
 // Secrets to strip from Bash tool subprocess environments.
 // These are needed by claude-code for API auth but should never
 // be visible to commands it runs.
-const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
+const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'GEMINI_API_KEY'];
+
+// Tool credentials that ARE safe to expose to Bash subprocesses (gh, curl, etc.)
+const TOOL_CREDENTIAL_VARS = ['GITHUB_TOKEN', 'BRAVE_API_KEY'];
 
 function createSanitizeBashHook(): HookCallback {
   return async (input, _toolUseId, _context) => {
@@ -531,11 +534,17 @@ ${containerInput.prompt}`
     process.exit(1);
   }
 
-  // Build SDK env: merge secrets into process.env for the SDK only.
-  // Secrets never touch process.env itself, so Bash subprocesses can't see them.
+  // Build SDK env: merge all secrets in for the SDK.
+  // Tool credentials (GITHUB_TOKEN etc.) are also written to process.env so
+  // Bash subprocesses (gh, curl) can use them. AI API keys are kept SDK-only.
   const sdkEnv: Record<string, string | undefined> = { ...process.env };
   for (const [key, value] of Object.entries(containerInput.secrets || {})) {
     sdkEnv[key] = value;
+    if (TOOL_CREDENTIAL_VARS.includes(key)) {
+      process.env[key] = value;
+      // gh CLI uses GH_TOKEN as well
+      if (key === 'GITHUB_TOKEN') process.env['GH_TOKEN'] = value;
+    }
   }
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
