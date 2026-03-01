@@ -1,4 +1,4 @@
-import { Bot } from 'grammy';
+import { Bot, InputFile } from 'grammy';
 import { ASSISTANT_NAME } from '../config.js';
 import { logger } from '../logger.js';
 import {
@@ -177,6 +177,21 @@ export class TelegramChannel implements Channel {
     async disconnect(): Promise<void> {
         this.connected = false;
         await Promise.all(this.bots.map(b => b.stop()));
+    }
+
+    async sendPhoto(jid: string, filePath: string, caption?: string): Promise<void> {
+        if (!this.connected) return;
+        const bot = this.botForJid(jid);
+        const chatId = this.rawChatId(jid);
+        try {
+            const stream = fs.createReadStream(filePath);
+            const opts: Record<string, unknown> = {};
+            if (caption) opts.caption = caption;
+            await bot.api.sendPhoto(chatId, new InputFile(stream), opts as any);
+            logger.info({ jid }, 'Photo sent via Telegram');
+        } catch (err) {
+            logger.warn({ err, jid, filePath }, 'Failed to send Telegram photo');
+        }
     }
 
     async setTyping(jid: string, isTyping: boolean): Promise<void> {

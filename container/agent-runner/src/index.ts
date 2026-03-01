@@ -672,6 +672,18 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
         required: ['path', 'content'],
       },
     },
+    {
+      name: 'send_photo',
+      description: 'Send an image/screenshot file to the user. Use after taking a screenshot or generating an image. The file must already exist on disk.',
+      parameters: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string', description: 'Absolute path to the image file to send (e.g. /workspace/group/screenshot.png)' },
+          caption: { type: 'string', description: 'Optional caption for the photo' },
+        },
+        required: ['file_path'],
+      },
+    },
   ];
 
   // Read system prompt from GEMINI.md or CLAUDE.md if available
@@ -732,6 +744,25 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
           fs.mkdirSync(path.dirname(args.path), { recursive: true });
           fs.writeFileSync(args.path, args.content);
           result = 'File written';
+        } else if (fn.name === 'send_photo') {
+          const srcPath = args.file_path;
+          if (!fs.existsSync(srcPath)) {
+            result = `File not found: ${srcPath}`;
+          } else {
+            const ext = path.extname(srcPath) || '.png';
+            const mediaDir = '/workspace/ipc/media';
+            fs.mkdirSync(mediaDir, { recursive: true });
+            const mediaFile = `photo_${Date.now()}${ext}`;
+            fs.copyFileSync(srcPath, path.join(mediaDir, mediaFile));
+            const ipcFile = `/workspace/ipc/messages/photo_${Date.now()}.json`;
+            fs.writeFileSync(ipcFile, JSON.stringify({
+              type: 'photo',
+              chatJid: containerInput.chatJid,
+              mediaFile,
+              caption: args.caption || '',
+            }));
+            result = `Photo queued for delivery: ${mediaFile}`;
+          }
         }
       } catch (err) {
         result = `Error: ${err instanceof Error ? err.message : String(err)}`;

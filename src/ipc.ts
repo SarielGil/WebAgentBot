@@ -20,6 +20,7 @@ import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
+  sendPhoto?: (jid: string, filePath: string, caption?: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroupMetadata: (force: boolean) => Promise<void>;
@@ -92,6 +93,21 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     { chatJid: data.chatJid, sourceGroup },
                     'Unauthorized IPC message attempt blocked',
                   );
+                }
+              } else if (data.type === 'photo' && data.chatJid && data.mediaFile) {
+                const targetGroup = registeredGroups[data.chatJid];
+                if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
+                  if (deps.sendPhoto) {
+                    const hostMediaPath = path.join(ipcBaseDir, sourceGroup, 'media', path.basename(data.mediaFile));
+                    await deps.sendPhoto(data.chatJid, hostMediaPath, data.caption);
+                    logger.info({ chatJid: data.chatJid, sourceGroup }, 'IPC photo sent');
+                    // Clean up the media file after delivery
+                    try { fs.unlinkSync(hostMediaPath); } catch {}
+                  } else {
+                    logger.warn({ chatJid: data.chatJid }, 'sendPhoto not supported by channel, dropping photo IPC');
+                  }
+                } else {
+                  logger.warn({ chatJid: data.chatJid, sourceGroup }, 'Unauthorized IPC photo attempt blocked');
                 }
               }
               fs.unlinkSync(filePath);
