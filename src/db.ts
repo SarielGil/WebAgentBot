@@ -32,6 +32,8 @@ function createSchema(database: Database.Database): void {
       timestamp TEXT,
       is_from_me INTEGER,
       is_bot_message INTEGER DEFAULT 0,
+      media_path TEXT,
+      media_metadata TEXT,
       PRIMARY KEY (id, chat_jid),
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
@@ -71,7 +73,8 @@ function createSchema(database: Database.Database): void {
     );
     CREATE TABLE IF NOT EXISTS sessions (
       group_folder TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL
+      session_id TEXT NOT NULL,
+      summary TEXT
     );
     CREATE TABLE IF NOT EXISTS registered_groups (
       jid TEXT PRIMARY KEY,
@@ -249,7 +252,7 @@ export function setLastGroupSync(): void {
  */
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, media_path, media_metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -259,6 +262,8 @@ export function storeMessage(msg: NewMessage): void {
     msg.timestamp,
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
+    msg.media_path || null,
+    msg.media_metadata || null,
   );
 }
 
@@ -338,6 +343,12 @@ export function getMessagesSince(
   return db
     .prepare(sql)
     .all(chatJid, sinceTimestamp, `${botPrefix}:%`) as NewMessage[];
+}
+
+export function updateMessageMediaMetadata(chatJid: string, msgId: string, metadata: string): void {
+  db.prepare(
+    `UPDATE messages SET media_metadata = ? WHERE chat_jid = ? AND id = ?`,
+  ).run(metadata, chatJid, msgId);
 }
 
 export function createTask(
@@ -497,19 +508,22 @@ export function getSession(groupFolder: string): string | undefined {
   return row?.session_id;
 }
 
-export function setSession(groupFolder: string, sessionId: string): void {
+export function setSession(groupFolder: string, sessionId: string, summary?: string): void {
   db.prepare(
-    'INSERT OR REPLACE INTO sessions (group_folder, session_id) VALUES (?, ?)',
-  ).run(groupFolder, sessionId);
+    'INSERT OR REPLACE INTO sessions (group_folder, session_id, summary) VALUES (?, ?, COALESCE(?, summary))',
+  ).run(groupFolder, sessionId, summary || null);
 }
 
-export function getAllSessions(): Record<string, string> {
+export function getAllSessions(): Record<string, { sessionId: string; summary?: string }> {
   const rows = db
-    .prepare('SELECT group_folder, session_id FROM sessions')
-    .all() as Array<{ group_folder: string; session_id: string }>;
-  const result: Record<string, string> = {};
+    .prepare('SELECT group_folder, session_id, summary FROM sessions')
+    .all() as Array<{ group_folder: string; session_id: string; summary: string | null }>;
+  const result: Record<string, { sessionId: string; summary?: string }> = {};
   for (const row of rows) {
-    result[row.group_folder] = row.session_id;
+    result[row.group_folder] = {
+      sessionId: row.session_id,
+      summary: row.summary || undefined,
+    };
   }
   return result;
 }
@@ -523,14 +537,14 @@ export function getRegisteredGroup(
     .prepare('SELECT * FROM registered_groups WHERE jid = ?')
     .get(jid) as
     | {
-        jid: string;
-        name: string;
-        folder: string;
-        trigger_pattern: string;
-        added_at: string;
-        container_config: string | null;
-        requires_trigger: number | null;
-      }
+      jid: string;
+      name: string;
+      folder: string;
+      trigger_pattern: string;
+      added_at: string;
+      container_config: string | null;
+      requires_trigger: number | null;
+    }
     | undefined;
   if (!row) return undefined;
   if (!isValidGroupFolder(row.folder)) {

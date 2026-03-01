@@ -12,6 +12,8 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   secrets?: Record<string, string>;
+  mediaPath?: string;
+  mediaMetadata?: string;
 }
 
 interface ContainerOutput {
@@ -250,8 +252,36 @@ async function runChatLoop(ai: GoogleGenerativeAI, input: ContainerInput): Promi
   let prompt = input.prompt;
   if (input.isScheduledTask) prompt = `[SCHEDULED TASK]\n\n${prompt}`;
 
+  // Handle Multimodal Media
+  let messageContent: any[] = [prompt];
+  if (input.mediaPath && fs.existsSync(input.mediaPath)) {
+    const fileData = fs.readFileSync(input.mediaPath);
+    const mimeType = input.mediaPath.endsWith('.mp4') ? 'video/mp4' : 'image/jpeg';
+    messageContent.push({
+      inlineData: {
+        data: fileData.toString('base64'),
+        mimeType: mimeType
+      }
+    });
+
+    if (!input.mediaMetadata) {
+      // Analysis Turn
+      messageContent = [
+        `Please analyze this media file and provide a concise technical description/summary. 
+        Focus on brand elements, color palettes, and business context if relevant.
+        Your response will be stored as metadata for future turns to avoid resending this file.`,
+        {
+          inlineData: {
+            data: fileData.toString('base64'),
+            mimeType: mimeType
+          }
+        }
+      ];
+    }
+  }
+
   try {
-    let result = await chat.sendMessage(prompt);
+    let result = await chat.sendMessage(messageContent);
 
     while (result.response.candidates?.[0]?.content?.parts?.some(p => p.functionCall)) {
       const calls = result.response.candidates[0].content.parts.filter(p => p.functionCall);

@@ -8,6 +8,11 @@ import {
     RegisteredGroup,
 } from '../types.js';
 import { readEnvFile } from '../env.js';
+import { MEDIA_DIR } from '../config.js';
+import https from 'https';
+import fs from 'fs';
+import path from 'path';
+import { pipeline } from 'stream/promises';
 
 export interface TelegramChannelOpts {
     onMessage: OnInboundMessage;
@@ -40,14 +45,12 @@ export class TelegramChannel implements Channel {
 
     async connect(): Promise<void> {
         this.bot.on('message', async (ctx) => {
-            if (!ctx.message || !ctx.message.text) return;
-
-            // Use stringified chat ID as JID
             const chatId = ctx.chat.id.toString();
             const isGroup = ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
             const timestamp = new Date(ctx.message.date * 1000).toISOString();
+            const registeredGroups = this.opts.registeredGroups();
 
-            // Ensure chat metadata is registered
+            // Ignore non-registered groups if needed, but always sync metadata
             this.opts.onChatMetadata(
                 chatId,
                 timestamp,
@@ -56,28 +59,36 @@ export class TelegramChannel implements Channel {
                 isGroup
             );
 
-            const registeredGroups = this.opts.registeredGroups();
+            if (!registeredGroups[chatId]) return;
 
-            // Since default nanoclaw only listens to registered groups, 
-            // if it's not setup yet via main channel, it drops the msg.
-            // But we always need to handle it if we want to auto-onboard users.
-            // For now, if the group is registered, process it.
-            if (registeredGroups[chatId]) {
-                const textStr = ctx.message.text;
-                const senderId = ctx.from.id.toString();
-                const senderName = ctx.from.username || ctx.from.first_name || senderId;
+            const senderId = ctx.from?.id.toString() || 'unknown';
+            const senderName = ctx.from?.username || ctx.from?.first_name || senderId;
+            let content = ctx.message.text || ctx.message.caption || '';
+            let mediaPath: string | undefined;
 
-                this.opts.onMessage(chatId, {
-                    id: ctx.message.message_id.toString(),
-                    chat_jid: chatId,
-                    sender: senderId,
-                    sender_name: senderName,
-                    content: textStr,
-                    timestamp,
-                    is_from_me: false,
-                    is_bot_message: false,
-                });
+            // Handle Media
+            if (ctx.message.photo) {
+                const photo = ctx.message.photo[ctx.message.photo.length - 1];
+                mediaPath = await this.downloadTelegramFile(photo.file_id, 'photo');
+            } else if (ctx.message.video) {
+                mediaPath = await this.downloadTelegramFile(ctx.message.video.file_id, 'video');
+            } else if (ctx.message.document) {
+                mediaPath = await this.downloadTelegramFile(ctx.message.document.file_id, 'doc');
             }
+
+            if (!content && !mediaPath) return;
+
+            this.opts.onMessage(chatId, {
+                id: ctx.message.message_id.toString(),
+                chat_jid: chatId,
+                sender: senderId,
+                sender_name: senderName,
+                content,
+                timestamp,
+                is_from_me: false,
+                is_bot_message: false,
+                media_path: mediaPath,
+            });
         });
 
         this.bot.catch((err) => {
@@ -140,6 +151,38 @@ export class TelegramChannel implements Channel {
             }
         } finally {
             this.flushing = false;
+        }
+    }
+
+    private async downloadTelegramFile(fileId: string, prefix: string): Promise<string | undefined> {
+        try {
+            const file = await this.bot.api.getFile(fileId);
+            if (!file.file_path) return undefined;
+
+            const ext = path.extname(file.file_path) || (prefix === 'photo' ? '.jpg' : '');
+            const fileName = `${prefix}_${Date.now()}${ext}`;
+            const targetPath = path.join(MEDIA_DIR, fileName);
+
+            const url = `https://api.telegram.org/file/bot${this.bot.token}/${file.file_path}`;
+
+            return new Promise((resolve, reject) => {
+                https.get(url, (res) => {
+                    if (res.statusCode !== 200) {
+                        reject(new Error(`Failed to download file: ${res.statusCode}`));
+                        return;
+                    }
+                    const writeStream = fs.createWriteStream(targetPath);
+                    res.pipe(writeStream);
+                    writeStream.on('finish', () => {
+                        writeStream.close();
+                        resolve(targetPath);
+                    });
+                    writeStream.on('error', reject);
+                });
+            });
+        } catch (err) {
+            logger.error({ err, fileId }, 'Failed to download Telegram file');
+            return undefined;
         }
     }
 }

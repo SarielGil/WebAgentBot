@@ -33,11 +33,17 @@ import {
   setSession,
   storeChatMetadata,
   storeMessage,
+  updateMessageMediaMetadata,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
-import { findChannel, formatMessages, formatOutbound } from './router.js';
+import {
+  findChannel,
+  formatMessages,
+  formatOutbound,
+  stripInternalTags,
+} from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { GitHubService } from './services/github.js';
 import { SlackChannel } from './channels/slack.js';
@@ -49,7 +55,7 @@ import { logger } from './logger.js';
 export { escapeXml, formatMessages } from './router.js';
 
 let lastTimestamp = '';
-let sessions: Record<string, string> = {};
+let sessions: Record<string, { sessionId: string; summary?: string }> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
@@ -165,7 +171,74 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages);
+  const isMain = group.folder === MAIN_GROUP_FOLDER;
+
+  // 1. Handle Media Analysis Turns
+  for (const msg of missedMessages) {
+    if (msg.media_path && !msg.media_metadata) {
+      logger.info({ group: group.name, msgId: msg.id }, 'Triggering media analysis turn');
+      // We run a special one-off container turn just for analysis
+      const analysisOutput = await runContainerAgent(
+        group,
+        {
+          prompt: 'Analyze this media',
+          groupFolder: group.folder,
+          chatJid,
+          isMain,
+          mediaPath: msg.media_path,
+          assistantName: ASSISTANT_NAME,
+        },
+        (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder)
+      );
+
+      if (analysisOutput.status === 'success' && analysisOutput.result) {
+        const metadata = stripInternalTags(analysisOutput.result);
+        updateMessageMediaMetadata(chatJid, msg.id, metadata);
+        msg.media_metadata = metadata; // Update in-memory for the current context
+        logger.info({ group: group.name, msgId: msg.id }, 'Media analysis complete');
+      }
+    }
+  }
+
+  // 2. Context Compression (Summarization)
+  const session = sessions[group.folder] || { sessionId: '' };
+
+  // If missedMessages is long (e.g. > 15), trigger a summarization turn
+  if (missedMessages.length > 20) {
+    logger.info({ group: group.name }, 'Deep history detected, triggering summarization turn');
+    const fullHistory = formatMessages(missedMessages);
+    const summarizationOutput = await runContainerAgent(
+      group,
+      {
+        prompt: `Please summarize the key points and brand decisions from this conversation history into a concise block of metadata.
+        Focus on: Website Name, brand colors, domains discussed, and specific design preferences.
+        
+        History: 
+        ${fullHistory}`,
+        sessionId: session.sessionId,
+        groupFolder: group.folder,
+        chatJid,
+        isMain,
+        assistantName: ASSISTANT_NAME,
+      },
+      (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder)
+    );
+
+    if (summarizationOutput.status === 'success' && summarizationOutput.result) {
+      const summary = stripInternalTags(summarizationOutput.result);
+      session.summary = summary;
+      setSession(group.folder, session.sessionId, summary);
+      logger.info({ group: group.name }, 'Context summarized and saved');
+    }
+  }
+
+  // 3. Final Prompt Construction
+  const slidingWindow = missedMessages.slice(-10);
+  let contextPrompt = '';
+  if (session.summary) {
+    contextPrompt += `<conversation_summary>\n${session.summary}\n</conversation_summary>\n\n`;
+  }
+  const finalPrompt = contextPrompt + formatMessages(slidingWindow);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -197,7 +270,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
+  const output = await runAgent(group, finalPrompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw =
@@ -257,7 +330,9 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
-  const sessionId = sessions[group.folder];
+  const session = sessions[group.folder];
+  const sessionId = session?.sessionId;
+  const summary = session?.summary;
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -288,7 +363,8 @@ async function runAgent(
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
       if (output.newSessionId) {
-        sessions[group.folder] = output.newSessionId;
+        if (!sessions[group.folder]) sessions[group.folder] = { sessionId: output.newSessionId };
+        sessions[group.folder].sessionId = output.newSessionId;
         setSession(group.folder, output.newSessionId);
       }
       await onOutput(output);
@@ -312,7 +388,8 @@ async function runAgent(
     );
 
     if (output.newSessionId) {
-      sessions[group.folder] = output.newSessionId;
+      if (!sessions[group.folder]) sessions[group.folder] = { sessionId: output.newSessionId };
+      sessions[group.folder].sessionId = output.newSessionId;
       setSession(group.folder, output.newSessionId);
     }
 

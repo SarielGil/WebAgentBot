@@ -39,6 +39,8 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   secrets?: Record<string, string>;
+  mediaPath?: string;
+  mediaMetadata?: string;
 }
 
 export interface ContainerOutput {
@@ -98,6 +100,16 @@ function buildVolumeMounts(
         readonly: true,
       });
     }
+  }
+
+  // Mount Media Directory (read-only)
+  const mediaDir = path.resolve(DATA_DIR, 'media');
+  if (fs.existsSync(mediaDir)) {
+    mounts.push({
+      hostPath: mediaDir,
+      containerPath: '/workspace/media',
+      readonly: true,
+    });
   }
 
   // Per-group Claude sessions directory (isolated from other groups)
