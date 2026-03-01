@@ -283,25 +283,63 @@ async function runChatLoop(ai: GoogleGenerativeAI, input: ContainerInput): Promi
   try {
     let result = await chat.sendMessage(messageContent);
 
-    while (result.response.candidates?.[0]?.content?.parts?.some(p => p.functionCall)) {
-      const calls = result.response.candidates[0].content.parts.filter(p => p.functionCall);
-      const toolResponses = await Promise.all(calls.map(async (call) => {
-        const response = await handleToolCall(call.functionCall!.name, call.functionCall!.args, input);
-        return {
-          functionResponse: {
-            name: call.functionCall!.name,
-            response: response
+    while (true) {
+      // Handle tool calls
+      while (result.response.candidates?.[0]?.content?.parts?.some(p => p.functionCall)) {
+        const calls = result.response.candidates[0].content.parts.filter(p => p.functionCall);
+        const toolResponses = await Promise.all(calls.map(async (call) => {
+          const response = await handleToolCall(call.functionCall!.name, call.functionCall!.args, input);
+          return {
+            functionResponse: {
+              name: call.functionCall!.name,
+              response: response
+            }
+          };
+        }));
+
+        result = await chat.sendMessage(toolResponses);
+      }
+
+      // Output response
+      writeOutput({
+        status: 'success',
+        result: result.response.text(),
+      });
+
+      // Wait for next IPC message or close sentinel
+      log('Execution complete, waiting for next IPC message...');
+      let nextPrompt: string | null = null;
+      while (true) {
+        if (fs.existsSync(IPC_INPUT_CLOSE_SENTINEL)) {
+          log('Close sentinel detected, exiting');
+          return;
+        }
+
+        const files = fs.readdirSync(IPC_INPUT_DIR).filter(f => f.endsWith('.json'));
+        if (files.length > 0) {
+          const file = files.sort()[0];
+          const filePath = path.join(IPC_INPUT_DIR, file);
+          try {
+            const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+            if (data.type === 'message') {
+              nextPrompt = data.text;
+              log(`Received follow-up message: ${nextPrompt?.slice(0, 50)}...`);
+            }
+          } catch (err) {
+            log(`Error reading IPC file: ${err}`);
+          } finally {
+            fs.unlinkSync(filePath);
           }
-        };
-      }));
+          if (nextPrompt) break;
+        }
 
-      result = await chat.sendMessage(toolResponses);
+        await new Promise(resolve => setTimeout(resolve, IPC_POLL_MS));
+      }
+
+      if (nextPrompt) {
+        result = await chat.sendMessage(nextPrompt);
+      }
     }
-
-    writeOutput({
-      status: 'success',
-      result: result.response.text(),
-    });
   } catch (err: any) {
     log(`Chat error: ${err.message}`);
     writeOutput({
