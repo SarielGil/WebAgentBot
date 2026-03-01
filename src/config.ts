@@ -14,7 +14,10 @@ export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER ||
     envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
 export const IDLE_TIMEOUT = 30_000;
-export const BATCH_DELAY = 5_000;
+// Debounce window: reset on every new message, fire when user goes quiet.
+// 1500ms is the sweet spot — long enough to catch rapid follow-up messages,
+// short enough to feel responsive. (Typing events not available on Telegram/Slack bots.)
+export const BATCH_DELAY = 1_500;
 export const POLL_INTERVAL = 3_000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 

@@ -682,7 +682,7 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
   }
 
   const chat = ai.chats.create({
-    model: 'gemini-2.5-flash',
+    model: 'gemini-3-flash-preview',
     config: {
       systemInstruction,
       // @ts-ignore — tools shape accepted at runtime
