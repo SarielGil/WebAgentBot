@@ -49,6 +49,7 @@ import { startSchedulerLoop } from './task-scheduler.js';
 import { GitHubService } from './services/github.js';
 import { SlackChannel } from './channels/slack.js';
 import { DomainService } from './services/domain.js';
+import { SearchService } from './services/search.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -66,6 +67,7 @@ let telegram: TelegramChannel;
 export let githubService: GitHubService;
 export let slackChannel: SlackChannel;
 export let domainService: DomainService;
+export let searchService: SearchService;
 export const channels: Channel[] = [];
 export const queue = new GroupQueue();
 
@@ -454,25 +456,26 @@ export async function routeNewMessages(newMessages: NewMessage[]): Promise<void>
 
   for (const [chatJid, groupMessages] of Object.entries(byChat)) {
     const group = registeredGroups[chatJid];
-    if (!group) continue;
+    if (!group) {
+      continue;
+    }
 
     const channel = findChannel(channels, chatJid);
     if (!channel) {
-      logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
+      logger.warn({ chatJid }, 'routeNewMessages: no channel owns JID');
       continue;
     }
 
     const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
     const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
 
-    // For non-main groups, only act on trigger messages.
-    // Non-trigger messages accumulate in DB and get pulled as
-    // context when a trigger eventually arrives.
     if (needsTrigger) {
       const hasTrigger = groupMessages.some((m) =>
         TRIGGER_PATTERN.test(m.content.trim()),
       );
-      if (!hasTrigger) continue;
+      if (!hasTrigger) {
+        continue;
+      }
     }
 
     // If a batch timer is already running for this group, clear it (reset the quiet period)
@@ -482,7 +485,7 @@ export async function routeNewMessages(newMessages: NewMessage[]): Promise<void>
       batchTimers.delete(chatJid);
     }
 
-    const timer = global.setTimeout(async () => {
+    const timer = globalThis.setTimeout(async () => {
       batchTimers.delete(chatJid);
 
       // Pull all messages since lastAgentTimestamp so non-trigger
@@ -550,6 +553,7 @@ async function main(): Promise<void> {
   githubService = new GitHubService();
   slackChannel = new SlackChannel();
   domainService = new DomainService();
+  searchService = new SearchService();
   loadState();
 
   // Graceful shutdown handlers

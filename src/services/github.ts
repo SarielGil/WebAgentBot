@@ -3,7 +3,7 @@ import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 
 export class GitHubService {
-    private octokit: Octokit;
+    public octokit: Octokit;
 
     constructor() {
         const envs = readEnvFile(['GITHUB_TOKEN']);
@@ -113,6 +113,28 @@ export class GitHubService {
             logger.info({ repo }, 'Files pushed to GitHub');
         } catch (err) {
             logger.error({ err, repo }, 'Failed to push files to GitHub');
+            throw err;
+        }
+    }
+
+    async enablePages(owner: string, repo: string, branch: string = 'main', path: '/' | '/docs' = '/'): Promise<void> {
+        try {
+            await this.octokit.repos.createPagesSite({
+                owner,
+                repo,
+                source: {
+                    branch,
+                    path,
+                },
+            });
+            logger.info({ repo }, 'GitHub Pages enabled');
+        } catch (err: any) {
+            // 409 means Pages is already enabled
+            if (err.status === 409) {
+                logger.info({ repo }, 'GitHub Pages already enabled');
+                return;
+            }
+            logger.error({ err, repo }, 'Failed to enable GitHub Pages');
             throw err;
         }
     }

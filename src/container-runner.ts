@@ -216,7 +216,7 @@ function buildVolumeMounts(
  * Secrets are never written to disk or mounted as files.
  */
 function readSecrets(): Record<string, string> {
-  return readEnvFile(['GEMINI_API_KEY', 'GITHUB_TOKEN']);
+  return readEnvFile(['GEMINI_API_KEY', 'GITHUB_TOKEN', 'BRAVE_API_KEY']);
 }
 
 function buildContainerArgs(

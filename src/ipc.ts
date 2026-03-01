@@ -14,7 +14,7 @@ import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
-import { githubService, domainService } from './index.js';
+import { githubService, domainService, searchService } from './index.js';
 import { slackChannel } from './index.js';
 import { RegisteredGroup } from './types.js';
 
@@ -415,12 +415,40 @@ export async function processTaskIpc(
     case 'web_search':
       if (data.query) {
         try {
-          const results = await googleIt({ query: data.query, 'no-display': true, limit: 5 });
+          const results = await searchService.search(data.query);
           const summary = results.map((r: any) => `[${r.title}](${r.link}): ${r.snippet}`).join('\n\n');
           await deps.sendMessage(data.chatJid!, `🔍 Search results for "${data.query}":\n\n${summary}`);
         } catch (err) {
           logger.error({ err }, 'IPC web_search failed');
           await deps.sendMessage(data.chatJid!, `❌ Failed to search: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      break;
+
+    case 'github_push':
+      if (data.repoName && (data as any).files) {
+        try {
+          const owner = (githubService as any).octokit.auth.split('_')[0]; // This is a hack, usually we need the owner. 
+          // Actually, let's just assume authenticated user is the owner for now or get it from git service.
+          const { data: user } = await (githubService as any).octokit.users.getAuthenticated();
+          await githubService.pushFiles(user.login, data.repoName, (data as any).files, (data as any).message);
+          await deps.sendMessage(data.chatJid!, `✅ Files pushed to GitHub repository: ${data.repoName}`);
+        } catch (err) {
+          logger.error({ err }, 'IPC github_push failed');
+          await deps.sendMessage(data.chatJid!, `❌ Failed to push files: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      break;
+
+    case 'github_pages':
+      if (data.repoName) {
+        try {
+          const { data: user } = await (githubService as any).octokit.users.getAuthenticated();
+          await githubService.enablePages(user.login, data.repoName);
+          await deps.sendMessage(data.chatJid!, `🚀 GitHub Pages enabled for ${data.repoName}. It will be live soon!`);
+        } catch (err) {
+          logger.error({ err }, 'IPC github_pages failed');
+          await deps.sendMessage(data.chatJid!, `❌ Failed to enable GitHub Pages: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
       break;
