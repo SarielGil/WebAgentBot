@@ -129,6 +129,13 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* columns already exist */
   }
+
+  // Add summary column to sessions if it doesn't exist
+  try {
+    database.exec(`ALTER TABLE sessions ADD COLUMN summary TEXT`);
+  } catch {
+    /* column already exists */
+  }
 }
 
 export function initDatabase(): void {
@@ -501,17 +508,24 @@ export function setRouterState(key: string, value: string): void {
 
 // --- Session accessors ---
 
-export function getSession(groupFolder: string): string | undefined {
+export function getSession(groupFolder: string): { sessionId: string; summary?: string } | undefined {
   const row = db
-    .prepare('SELECT session_id FROM sessions WHERE group_folder = ?')
-    .get(groupFolder) as { session_id: string } | undefined;
-  return row?.session_id;
+    .prepare('SELECT session_id, summary FROM sessions WHERE group_folder = ?')
+    .get(groupFolder) as { session_id: string; summary: string | null } | undefined;
+  if (!row) return undefined;
+  return {
+    sessionId: row.session_id,
+    summary: row.summary || undefined,
+  };
 }
 
 export function setSession(groupFolder: string, sessionId: string, summary?: string): void {
-  db.prepare(
-    'INSERT OR REPLACE INTO sessions (group_folder, session_id, summary) VALUES (?, ?, COALESCE(?, summary))',
-  ).run(groupFolder, sessionId, summary || null);
+  db.prepare(`
+    INSERT INTO sessions (group_folder, session_id, summary) VALUES (?, ?, ?)
+    ON CONFLICT(group_folder) DO UPDATE SET
+      session_id = excluded.session_id,
+      summary = CASE WHEN excluded.summary IS NOT NULL THEN excluded.summary ELSE sessions.summary END
+  `).run(groupFolder, sessionId, summary || null);
 }
 
 export function getAllSessions(): Record<string, { sessionId: string; summary?: string }> {

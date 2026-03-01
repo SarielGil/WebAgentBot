@@ -60,14 +60,14 @@ let sessions: Record<string, { sessionId: string; summary?: string }> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
-const batchTimers = new Map<string, ReturnType<typeof setTimeout>>();
+export const batchTimers = new Map<string, NodeJS.Timeout>();
 
 let telegram: TelegramChannel;
 export let githubService: GitHubService;
 export let slackChannel: SlackChannel;
 export let domainService: DomainService;
-const channels: Channel[] = [];
-const queue = new GroupQueue();
+export const channels: Channel[] = [];
+export const queue = new GroupQueue();
 
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
@@ -435,86 +435,88 @@ async function startMessageLoop(): Promise<void> {
         lastTimestamp = newTimestamp;
         saveState();
 
-        // Deduplicate by group
-        const messagesByGroup = new Map<string, NewMessage[]>();
-        for (const msg of messages) {
-          const existing = messagesByGroup.get(msg.chat_jid);
-          if (existing) {
-            existing.push(msg);
-          } else {
-            messagesByGroup.set(msg.chat_jid, [msg]);
-          }
-        }
-
-        for (const [chatJid, groupMessages] of messagesByGroup) {
-          const group = registeredGroups[chatJid];
-          if (!group) continue;
-
-          const channel = findChannel(channels, chatJid);
-          if (!channel) {
-            logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
-            continue;
-          }
-
-          const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
-          const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
-
-          // For non-main groups, only act on trigger messages.
-          // Non-trigger messages accumulate in DB and get pulled as
-          // context when a trigger eventually arrives.
-          if (needsTrigger) {
-            const hasTrigger = groupMessages.some((m) =>
-              TRIGGER_PATTERN.test(m.content.trim()),
-            );
-            if (!hasTrigger) continue;
-          }
-
-          // If a batch timer is already running for this group, clear it (reset the quiet period)
-          if (batchTimers.has(chatJid)) {
-            clearTimeout(batchTimers.get(chatJid));
-          }
-
-          const timer = setTimeout(async () => {
-            batchTimers.delete(chatJid);
-
-            // Pull all messages since lastAgentTimestamp so non-trigger
-            // context that accumulated between triggers is included.
-            const allPending = getMessagesSince(
-              chatJid,
-              lastAgentTimestamp[chatJid] || '',
-              ASSISTANT_NAME,
-            );
-            const messagesToSend =
-              allPending.length > 0 ? allPending : groupMessages;
-            const formatted = formatMessages(messagesToSend);
-
-            if (queue.sendMessage(chatJid, formatted)) {
-              logger.debug(
-                { chatJid, count: messagesToSend.length },
-                'Piped messages to active container',
-              );
-              lastAgentTimestamp[chatJid] =
-                messagesToSend[messagesToSend.length - 1].timestamp;
-              saveState();
-              // Show typing indicator while the container processes the piped message
-              channel
-                .setTyping?.(chatJid, true)
-                ?.catch((err) =>
-                  logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
-                );
-            } else {
-              // No active container — enqueue for a new one
-              queue.enqueueMessageCheck(chatJid);
-            }
-          }, BATCH_DELAY);
-
-          batchTimers.set(chatJid, timer);
-        }
+        await routeNewMessages(messages);
       }
     } catch (err) {
       logger.error({ err }, 'Error in message loop');
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
+  }
+}
+
+/** @internal - exported for testing */
+export async function routeNewMessages(newMessages: NewMessage[]): Promise<void> {
+  const byChat: Record<string, NewMessage[]> = {};
+  for (const msg of newMessages) {
+    if (!byChat[msg.chat_jid]) byChat[msg.chat_jid] = [];
+    byChat[msg.chat_jid].push(msg);
+  }
+
+  for (const [chatJid, groupMessages] of Object.entries(byChat)) {
+    const group = registeredGroups[chatJid];
+    if (!group) continue;
+
+    const channel = findChannel(channels, chatJid);
+    if (!channel) {
+      logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
+      continue;
+    }
+
+    const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
+    const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
+
+    // For non-main groups, only act on trigger messages.
+    // Non-trigger messages accumulate in DB and get pulled as
+    // context when a trigger eventually arrives.
+    if (needsTrigger) {
+      const hasTrigger = groupMessages.some((m) =>
+        TRIGGER_PATTERN.test(m.content.trim()),
+      );
+      if (!hasTrigger) continue;
+    }
+
+    // If a batch timer is already running for this group, clear it (reset the quiet period)
+    const existingTimer = batchTimers.get(chatJid);
+    if (existingTimer) {
+      global.clearTimeout(existingTimer);
+      batchTimers.delete(chatJid);
+    }
+
+    const timer = global.setTimeout(async () => {
+      batchTimers.delete(chatJid);
+
+      // Pull all messages since lastAgentTimestamp so non-trigger
+      // context that accumulated between triggers is included.
+      const allPending = getMessagesSince(
+        chatJid,
+        lastAgentTimestamp[chatJid] || '',
+        ASSISTANT_NAME,
+      );
+      const messagesToSend =
+        allPending.length > 0 ? allPending : groupMessages;
+      const formatted = formatMessages(messagesToSend);
+
+      if (queue.sendMessage(chatJid, formatted)) {
+        logger.debug(
+          { chatJid, count: messagesToSend.length },
+          'Piped messages to active container',
+        );
+        lastAgentTimestamp[chatJid] =
+          messagesToSend[messagesToSend.length - 1].timestamp;
+        saveState();
+        // Show typing indicator while the container processes the piped message
+        channel
+          .setTyping?.(chatJid, true)
+          ?.catch((err) =>
+            logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
+          );
+      } else {
+        // No active container — enqueue for a new one
+        queue.enqueueMessageCheck(chatJid);
+      }
+    }, BATCH_DELAY);
+
+    batchTimers.set(chatJid, timer);
   }
 }
 

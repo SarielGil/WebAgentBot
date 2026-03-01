@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  orchestrator:
+    build: .
+    container_name: webbot-orchestrator
+    # Mount Docker socket to allow orchestrator to spawn sub-agent containers on the host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/app/data
+      - ./groups:/app/groups
+      - ./store:/app/store
+    env_file: .env
+    restart: unless-stopped
+    # Interactive mode for Telegram auth if needed (though grammy handles it via env token usually)
+    stdin_open: true
+    tty: true
+
+networks:
+  default:
+    name: webbot-network
