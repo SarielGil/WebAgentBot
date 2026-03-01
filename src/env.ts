@@ -14,8 +14,15 @@ export function readEnvFile(keys: string[]): Record<string, string> {
   try {
     content = fs.readFileSync(envFile, 'utf-8');
   } catch (err) {
-    logger.debug({ err }, '.env file not found, using defaults');
-    return {};
+    logger.debug({ err }, '.env file not found, falling back to process.env');
+    // Fall back entirely to process.env when the file is missing
+    // (e.g. inside Docker where .env is not copied into the image but
+    // env vars are injected via docker-compose env_file at runtime)
+    const result: Record<string, string> = {};
+    for (const key of keys) {
+      if (process.env[key]) result[key] = process.env[key] as string;
+    }
+    return result;
   }
 
   const result: Record<string, string> = {};
@@ -36,6 +43,14 @@ export function readEnvFile(keys: string[]): Record<string, string> {
       value = value.slice(1, -1);
     }
     if (value) result[key] = value;
+  }
+
+  // Fall back to process.env for any keys not found in the file
+  // (e.g. when running inside Docker where .env is not copied into the image)
+  for (const key of keys) {
+    if (!result[key] && process.env[key]) {
+      result[key] = process.env[key] as string;
+    }
   }
 
   return result;

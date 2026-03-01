@@ -22,6 +22,11 @@ export const SCHEDULER_POLL_INTERVAL = 60000;
 const PROJECT_ROOT = process.cwd();
 const HOME_DIR = process.env.HOME || os.homedir();
 
+// When running inside Docker (DooD setup), the orchestrator's cwd is /app but
+// sub-agents are sibling containers that need HOST-side paths for volume mounts.
+export const HOST_PROJECT_ROOT: string =
+  process.env.HOST_PROJECT_ROOT || PROJECT_ROOT;
+
 // Mount security: allowlist stored OUTSIDE project root, never mounted into containers
 export const MOUNT_ALLOWLIST_PATH = path.join(
   HOME_DIR,

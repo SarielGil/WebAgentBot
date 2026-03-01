@@ -24,6 +24,7 @@
     "better-sqlite3": "^11.8.1",
     "cron-parser": "^5.5.0",
     "dotenv": "^17.3.1",
+    "@google/generative-ai": "^0.21.0",
     "google-it": "^1.6.4",
     "grammy": "^1.40.1",
     "inquirer": "^13.3.0",

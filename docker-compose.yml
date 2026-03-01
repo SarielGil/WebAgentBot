@@ -4,6 +4,7 @@ services:
   orchestrator:
     build: .
     container_name: webbot-orchestrator
+    user: root
     # Mount Docker socket to allow orchestrator to spawn sub-agent containers on the host
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -11,6 +12,11 @@ services:
       - ./groups:/app/groups
       - ./store:/app/store
     env_file: .env
+    environment:
+      # HOST_PROJECT_ROOT is set in .env to the absolute host path of the project.
+      # Required for DooD (Docker-out-of-Docker) volume mount path translation.
+      # It is loaded via env_file above; listed here only as documentation.
+      HOST_PROJECT_ROOT: ${HOST_PROJECT_ROOT}
     restart: unless-stopped
     # Interactive mode for Telegram auth if needed (though grammy handles it via env token usually)
     stdin_open: true

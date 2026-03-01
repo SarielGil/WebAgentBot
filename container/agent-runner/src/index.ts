@@ -1,7 +1,25 @@
+/**
+ * NanoClaw Agent Runner
+ * Runs inside a container, receives config via stdin, outputs result to stdout
+ *
+ * Input protocol:
+ *   Stdin: Full ContainerInput JSON (read until EOF, like before)
+ *   IPC:   Follow-up messages written as JSON files to /workspace/ipc/input/
+ *          Files: {type:"message", text:"..."}.json — polled and consumed
+ *          Sentinel: /workspace/ipc/input/_close — signals session end
+ *
+ * Stdout protocol:
+ *   Each result is wrapped in OUTPUT_START_MARKER / OUTPUT_END_MARKER pairs.
+ *   Multiple results may be emitted (one per agent teams result).
+ *   Final marker after loop ends signals completion.
+ */
+
 import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
-import { GoogleGenerativeAI, Tool, SchemaType } from '@google/generative-ai';
+import { query, HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { GoogleGenAI } from '@google/genai';
+import { fileURLToPath } from 'url';
 
 interface ContainerInput {
   prompt: string;
@@ -12,8 +30,6 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   secrets?: Record<string, string>;
-  mediaPath?: string;
-  mediaMetadata?: string;
 }
 
 interface ContainerOutput {
@@ -23,15 +39,72 @@ interface ContainerOutput {
   error?: string;
 }
 
+interface SessionEntry {
+  sessionId: string;
+  fullPath: string;
+  summary: string;
+  firstPrompt: string;
+}
+
+interface SessionsIndex {
+  entries: SessionEntry[];
+}
+
+interface SDKUserMessage {
+  type: 'user';
+  message: { role: 'user'; content: string };
+  parent_tool_use_id: null;
+  session_id: string;
+}
+
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
-const IPC_DIR = '/workspace/ipc';
-const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
-const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 const IPC_POLL_MS = 500;
 
-function log(message: string): void {
-  console.error(`[agent-runner] ${message}`);
+/**
+ * Push-based async iterable for streaming user messages to the SDK.
+ * Keeps the iterable alive until end() is called, preventing isSingleUserTurn.
+ */
+class MessageStream {
+  private queue: SDKUserMessage[] = [];
+  private waiting: (() => void) | null = null;
+  private done = false;
+
+  push(text: string): void {
+    this.queue.push({
+      type: 'user',
+      message: { role: 'user', content: text },
+      parent_tool_use_id: null,
+      session_id: '',
+    });
+    this.waiting?.();
+  }
+
+  end(): void {
+    this.done = true;
+    this.waiting?.();
+  }
+
+  async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage> {
+    while (true) {
+      while (this.queue.length > 0) {
+        yield this.queue.shift()!;
+      }
+      if (this.done) return;
+      await new Promise<void>(r => { this.waiting = r; });
+      this.waiting = null;
+    }
+  }
+}
+
+async function readStdin(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', chunk => { data += chunk; });
+    process.stdin.on('end', () => resolve(data));
+    process.stdin.on('error', reject);
+  });
 }
 
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -43,429 +116,636 @@ function writeOutput(output: ContainerOutput): void {
   console.log(OUTPUT_END_MARKER);
 }
 
-function writeIpcFile(dir: string, data: object): string {
-  fs.mkdirSync(dir, { recursive: true });
-  const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
-  const filepath = path.join(dir, filename);
-  fs.writeFileSync(filepath, JSON.stringify(data, null, 2));
-  return filename;
+function log(message: string): void {
+  console.error(`[agent-runner] ${message}`);
 }
 
-const tools: Tool[] = [
-  {
-    functionDeclarations: [
-      {
-        name: 'send_message',
-        description: 'Send a message to the user immediately.',
-        parameters: {
-          type: SchemaType.OBJECT,
-          properties: {
-            text: { type: SchemaType.STRING, description: 'The message text to send' },
-          },
-          required: ['text'],
-        },
-      },
-      {
-        name: 'github_create_repo',
-        description: 'Create a new GitHub repository.',
-        parameters: {
-          type: SchemaType.OBJECT,
-          properties: {
-            name: { type: SchemaType.STRING, description: 'The repository name' },
-            description: { type: SchemaType.STRING, description: 'The repository description' },
-          },
-          required: ['name'],
-        },
-      },
-      {
-        name: 'slack_escalate',
-        description: 'Escalate an issue to the admin via Slack.',
-        parameters: {
-          type: SchemaType.OBJECT,
-          properties: {
-            reason: { type: SchemaType.STRING, description: 'The reason for escalation' },
-          },
-          required: ['reason'],
-        },
-      },
-      {
-        name: 'bash',
-        description: 'Execute a bash command in the local container environment.',
-        parameters: {
-          type: SchemaType.OBJECT,
-          properties: {
-            command: { type: SchemaType.STRING, description: 'The command to execute' },
-          },
-          required: ['command'],
-        },
-      },
-      {
-        name: 'read_file',
-        description: 'Read the contents of a file.',
-        parameters: {
-          type: SchemaType.OBJECT,
-          properties: {
-            path: { type: SchemaType.STRING, description: 'The absolute path to the file' },
-          },
-          required: ['path'],
-        },
-      },
-      {
-        name: 'write_file',
-        description: 'Write content to a file.',
-        parameters: {
-          type: SchemaType.OBJECT,
-          properties: {
-            path: { type: SchemaType.STRING, description: 'The absolute path to the file' },
-            content: { type: SchemaType.STRING, description: 'The content to write' },
-          },
-          required: ['path', 'content'],
-        },
-      },
-      {
-        name: 'check_domain',
-        description: 'Check if a domain name is likely available (DNS lookup).',
-        parameters: {
-          type: SchemaType.OBJECT,
-          properties: {
-            domain: { type: SchemaType.STRING, description: 'The domain name (e.g. google.com)' },
-          },
-          required: ['domain'],
-        },
-      },
-      {
-        name: 'web_search',
-        description: 'Search the web for information about a business or brand.',
-        parameters: {
-          type: SchemaType.OBJECT,
-          properties: {
-            query: { type: SchemaType.STRING, description: 'The search query' },
-          },
-          required: ['query'],
-        },
-      },
-      {
-        name: 'github_push',
-        description: 'Push one or more text or base64-encoded files to a GitHub repository.',
-        parameters: {
-          type: SchemaType.OBJECT,
-          properties: {
-            repoName: { type: SchemaType.STRING, description: 'The repository name (must already exist)' },
-            files: {
-              type: SchemaType.ARRAY,
-              description: 'Array of files to push',
-              items: {
-                type: SchemaType.OBJECT,
-                properties: {
-                  path: { type: SchemaType.STRING, description: 'Path inside the repo (e.g. index.html)' },
-                  content: { type: SchemaType.STRING, description: 'File content (UTF-8 text or base64 for binary)' },
-                  encoding: { type: SchemaType.STRING, description: 'Encoding: "utf-8" (default) or "base64"' },
-                },
-                required: ['path', 'content'],
-              },
-            },
-            message: { type: SchemaType.STRING, description: 'Commit message' },
-          },
-          required: ['repoName', 'files'],
-        },
-      },
-      {
-        name: 'github_pages',
-        description: 'Enable GitHub Pages for a repository, deploying from the main branch.',
-        parameters: {
-          type: SchemaType.OBJECT,
-          properties: {
-            repoName: { type: SchemaType.STRING, description: 'The repository name' },
-            branch: { type: SchemaType.STRING, description: 'Branch to deploy from (default: main)' },
-          },
-          required: ['repoName'],
-        },
-      },
-      {
-        name: 'upload_photo_to_github',
-        description: 'Upload a photo (received from the user via chat) to a GitHub repository.',
-        parameters: {
-          type: SchemaType.OBJECT,
-          properties: {
-            repoName: { type: SchemaType.STRING, description: 'The repository name' },
-            photoPath: { type: SchemaType.STRING, description: 'Absolute path of the photo inside the container (e.g. /workspace/media/photo.jpg)' },
-            destPath: { type: SchemaType.STRING, description: 'Destination path inside the repo (e.g. images/photo.jpg)' },
-            message: { type: SchemaType.STRING, description: 'Commit message' },
-          },
-          required: ['repoName', 'photoPath', 'destPath'],
-        },
-      },
-    ],
-  },
-];
+function getSessionSummary(sessionId: string, transcriptPath: string): string | null {
+  const projectDir = path.dirname(transcriptPath);
+  const indexPath = path.join(projectDir, 'sessions-index.json');
 
-async function handleToolCall(name: string, args: any, input: ContainerInput): Promise<any> {
-  log(`Tool call: ${name} with ${JSON.stringify(args)}`);
-  switch (name) {
-    case 'send_message':
-      writeIpcFile(MESSAGES_DIR, {
-        type: 'message',
-        chatJid: input.chatJid,
-        text: args.text,
-        groupFolder: input.groupFolder,
-        timestamp: new Date().toISOString()
-      });
-      return { success: true, message: 'Message queued for delivery' };
-
-    case 'github_create_repo':
-      writeIpcFile(TASKS_DIR, {
-        type: 'github_create_repo',
-        chatJid: input.chatJid,
-        repoName: args.name,
-        repoDescription: args.description,
-        timestamp: new Date().toISOString()
-      });
-      return { success: true, message: 'Repository creation request sent to host.' };
-
-    case 'slack_escalate':
-      writeIpcFile(TASKS_DIR, {
-        type: 'slack_escalate',
-        chatJid: input.chatJid,
-        reason: args.reason,
-        timestamp: new Date().toISOString()
-      });
-      return { success: true, message: 'Escalation sent to admin.' };
-
-    case 'bash': {
-      try {
-        // Inject secrets as environment variables so the agent can use git, curl, etc.
-        const env: Record<string, string> = { ...(process.env as Record<string, string>) };
-        if (input.secrets?.GITHUB_TOKEN) env.GITHUB_TOKEN = input.secrets.GITHUB_TOKEN;
-        if (input.secrets?.BRAVE_API_KEY) env.BRAVE_API_KEY = input.secrets.BRAVE_API_KEY;
-        if (input.secrets?.GEMINI_API_KEY) env.GEMINI_API_KEY = input.secrets.GEMINI_API_KEY;
-        const stdout = execSync(args.command, { encoding: 'utf-8', timeout: 60000, env });
-        return { stdout };
-      } catch (err: any) {
-        return { error: err.message, stderr: err.stderr, stdout: err.stdout };
-      }
-    }
-
-    case 'read_file':
-      try {
-        const content = fs.readFileSync(args.path, 'utf-8');
-        return { content };
-      } catch (err: any) {
-        return { error: err.message };
-      }
-
-    case 'write_file':
-      try {
-        fs.mkdirSync(path.dirname(args.path), { recursive: true });
-        fs.writeFileSync(args.path, args.content);
-        return { success: true };
-      } catch (err: any) {
-        return { error: err.message };
-      }
-
-    case 'check_domain':
-      writeIpcFile(TASKS_DIR, {
-        type: 'domain_check',
-        chatJid: input.chatJid,
-        domain: args.domain,
-        timestamp: new Date().toISOString()
-      });
-      return { success: true, message: 'Domain check request sent.' };
-
-    case 'web_search':
-      writeIpcFile(TASKS_DIR, {
-        type: 'web_search',
-        chatJid: input.chatJid,
-        query: args.query,
-        timestamp: new Date().toISOString()
-      });
-      return { success: true, message: 'Web search request sent to host.' };
-
-    case 'github_push':
-      writeIpcFile(TASKS_DIR, {
-        type: 'github_push',
-        chatJid: input.chatJid,
-        repoName: args.repoName,
-        files: args.files,
-        message: args.message || 'Update from NanoClaw agent',
-        timestamp: new Date().toISOString()
-      });
-      return { success: true, message: 'GitHub push request sent to host.' };
-
-    case 'github_pages':
-      writeIpcFile(TASKS_DIR, {
-        type: 'github_pages',
-        chatJid: input.chatJid,
-        repoName: args.repoName,
-        branch: args.branch || 'main',
-        timestamp: new Date().toISOString()
-      });
-      return { success: true, message: 'GitHub Pages enable request sent to host.' };
-
-    case 'upload_photo_to_github': {
-      try {
-        const photoContent = fs.readFileSync(args.photoPath);
-        const base64Content = photoContent.toString('base64');
-        writeIpcFile(TASKS_DIR, {
-          type: 'github_push',
-          chatJid: input.chatJid,
-          repoName: args.repoName,
-          files: [{ path: args.destPath, content: base64Content, encoding: 'base64' }],
-          message: args.message || `Upload photo: ${args.destPath}`,
-          timestamp: new Date().toISOString()
-        });
-        return { success: true, message: 'Photo upload request sent to host.' };
-      } catch (err: any) {
-        return { error: `Failed to read photo: ${err.message}` };
-      }
-    }
-
-    default:
-      return { error: `Tool ${name} not implemented` };
-  }
-}
-
-async function runChatLoop(ai: GoogleGenerativeAI, input: ContainerInput): Promise<void> {
-  const model = ai.getGenerativeModel({
-    model: 'gemini-2.0-flash', // Updated to 2.0
-    tools: tools,
-  });
-
-  let systemInstruction = "You are a helpful assistant.";
-  const globalMd = '/workspace/global/GEMINI.md';
-  const localMd = '/workspace/group/GEMINI.md';
-  const roadmapMd = '/workspace/global/ROADMAP.md';
-  if (fs.existsSync(globalMd)) systemInstruction += '\n' + fs.readFileSync(globalMd, 'utf-8');
-  if (fs.existsSync(roadmapMd)) systemInstruction += '\n\n## CURRENT ROADMAP STATUS\n' + fs.readFileSync(roadmapMd, 'utf-8');
-  if (fs.existsSync(localMd)) systemInstruction += '\n' + fs.readFileSync(localMd, 'utf-8');
-
-  const chat = model.startChat({
-    history: [],
-    generationConfig: {
-      maxOutputTokens: 2048,
-    },
-  });
-
-  let prompt = input.prompt;
-  if (input.isScheduledTask) prompt = `[SCHEDULED TASK]\n\n${prompt}`;
-
-  // Handle Multimodal Media
-  let messageContent: any[] = [prompt];
-  if (input.mediaPath && fs.existsSync(input.mediaPath)) {
-    const fileData = fs.readFileSync(input.mediaPath);
-    const mimeType = input.mediaPath.endsWith('.mp4') ? 'video/mp4' : 'image/jpeg';
-    messageContent.push({
-      inlineData: {
-        data: fileData.toString('base64'),
-        mimeType: mimeType
-      }
-    });
-
-    if (!input.mediaMetadata) {
-      // Analysis Turn
-      messageContent = [
-        `Please analyze this media file and provide a concise technical description/summary. 
-        Focus on brand elements, color palettes, and business context if relevant.
-        Your response will be stored as metadata for future turns to avoid resending this file.`,
-        {
-          inlineData: {
-            data: fileData.toString('base64'),
-            mimeType: mimeType
-          }
-        }
-      ];
-    }
+  if (!fs.existsSync(indexPath)) {
+    log(`Sessions index not found at ${indexPath}`);
+    return null;
   }
 
   try {
-    let result = await chat.sendMessage(messageContent);
+    const index: SessionsIndex = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
+    const entry = index.entries.find(e => e.sessionId === sessionId);
+    if (entry?.summary) {
+      return entry.summary;
+    }
+  } catch (err) {
+    log(`Failed to read sessions index: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
-    while (true) {
-      // Handle tool calls
-      while (result.response.candidates?.[0]?.content?.parts?.some(p => p.functionCall)) {
-        const calls = result.response.candidates[0].content.parts.filter(p => p.functionCall);
-        const toolResponses = await Promise.all(calls.map(async (call) => {
-          const response = await handleToolCall(call.functionCall!.name, call.functionCall!.args, input);
-          return {
-            functionResponse: {
-              name: call.functionCall!.name,
-              response: response
-            }
-          };
-        }));
+  return null;
+}
 
-        result = await chat.sendMessage(toolResponses);
+/**
+ * Archive the full transcript to conversations/ before compaction.
+ */
+function createPreCompactHook(assistantName?: string): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const preCompact = input as PreCompactHookInput;
+    const transcriptPath = preCompact.transcript_path;
+    const sessionId = preCompact.session_id;
+
+    if (!transcriptPath || !fs.existsSync(transcriptPath)) {
+      log('No transcript found for archiving');
+      return {};
+    }
+
+    try {
+      const content = fs.readFileSync(transcriptPath, 'utf-8');
+      const messages = parseTranscript(content);
+
+      if (messages.length === 0) {
+        log('No messages to archive');
+        return {};
       }
 
-      // Output response
-      writeOutput({
-        status: 'success',
-        result: result.response.text(),
-      });
+      const summary = getSessionSummary(sessionId, transcriptPath);
+      const name = summary ? sanitizeFilename(summary) : generateFallbackName();
 
-      // Wait for next IPC message or close sentinel
-      log('Execution complete, waiting for next IPC message...');
-      let nextPrompt: string | null = null;
-      while (true) {
-        if (fs.existsSync(IPC_INPUT_CLOSE_SENTINEL)) {
-          log('Close sentinel detected, exiting');
-          return;
-        }
+      const conversationsDir = '/workspace/group/conversations';
+      fs.mkdirSync(conversationsDir, { recursive: true });
 
-        const files = fs.readdirSync(IPC_INPUT_DIR).filter(f => f.endsWith('.json'));
-        if (files.length > 0) {
-          const file = files.sort()[0];
-          const filePath = path.join(IPC_INPUT_DIR, file);
-          try {
-            const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-            if (data.type === 'message') {
-              nextPrompt = data.text;
-              log(`Received follow-up message: ${nextPrompt?.slice(0, 50)}...`);
-            }
-          } catch (err) {
-            log(`Error reading IPC file: ${err}`);
-          } finally {
-            fs.unlinkSync(filePath);
-          }
-          if (nextPrompt) break;
-        }
+      const date = new Date().toISOString().split('T')[0];
+      const filename = `${date}-${name}.md`;
+      const filePath = path.join(conversationsDir, filename);
 
-        await new Promise(resolve => setTimeout(resolve, IPC_POLL_MS));
+      const markdown = formatTranscriptMarkdown(messages, summary, assistantName);
+      fs.writeFileSync(filePath, markdown);
+
+      log(`Archived conversation to ${filePath}`);
+    } catch (err) {
+      log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    return {};
+  };
+}
+
+// Secrets to strip from Bash tool subprocess environments.
+// These are needed by claude-code for API auth but should never
+// be visible to commands it runs.
+const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
+
+function createSanitizeBashHook(): HookCallback {
+  return async (input, _toolUseId, _context) => {
+    const preInput = input as PreToolUseHookInput;
+    const command = (preInput.tool_input as { command?: string })?.command;
+    if (!command) return {};
+
+    const unsetPrefix = `unset ${SECRET_ENV_VARS.join(' ')} 2>/dev/null; `;
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        updatedInput: {
+          ...(preInput.tool_input as Record<string, unknown>),
+          command: unsetPrefix + command,
+        },
+      },
+    };
+  };
+}
+
+function sanitizeFilename(summary: string): string {
+  return summary
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 50);
+}
+
+function generateFallbackName(): string {
+  const time = new Date();
+  return `conversation-${time.getHours().toString().padStart(2, '0')}${time.getMinutes().toString().padStart(2, '0')}`;
+}
+
+interface ParsedMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+function parseTranscript(content: string): ParsedMessage[] {
+  const messages: ParsedMessage[] = [];
+
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const entry = JSON.parse(line);
+      if (entry.type === 'user' && entry.message?.content) {
+        const text = typeof entry.message.content === 'string'
+          ? entry.message.content
+          : entry.message.content.map((c: { text?: string }) => c.text || '').join('');
+        if (text) messages.push({ role: 'user', content: text });
+      } else if (entry.type === 'assistant' && entry.message?.content) {
+        const textParts = entry.message.content
+          .filter((c: { type: string }) => c.type === 'text')
+          .map((c: { text: string }) => c.text);
+        const text = textParts.join('');
+        if (text) messages.push({ role: 'assistant', content: text });
       }
+    } catch {
+    }
+  }
 
-      if (nextPrompt) {
-        result = await chat.sendMessage(nextPrompt);
+  return messages;
+}
+
+function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | null, assistantName?: string): string {
+  const now = new Date();
+  const formatDateTime = (d: Date) => d.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true
+  });
+
+  const lines: string[] = [];
+  lines.push(`# ${title || 'Conversation'}`);
+  lines.push('');
+  lines.push(`Archived: ${formatDateTime(now)}`);
+  lines.push('');
+  lines.push('---');
+  lines.push('');
+
+  for (const msg of messages) {
+    const sender = msg.role === 'user' ? 'User' : (assistantName || 'Assistant');
+    const content = msg.content.length > 2000
+      ? msg.content.slice(0, 2000) + '...'
+      : msg.content;
+    lines.push(`**${sender}**: ${content}`);
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Check for _close sentinel.
+ */
+function shouldClose(): boolean {
+  if (fs.existsSync(IPC_INPUT_CLOSE_SENTINEL)) {
+    try { fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL); } catch { /* ignore */ }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Drain all pending IPC input messages.
+ * Returns messages found, or empty array.
+ */
+function drainIpcInput(): string[] {
+  try {
+    fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
+    const files = fs.readdirSync(IPC_INPUT_DIR)
+      .filter(f => f.endsWith('.json'))
+      .sort();
+
+    const messages: string[] = [];
+    for (const file of files) {
+      const filePath = path.join(IPC_INPUT_DIR, file);
+      try {
+        const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        fs.unlinkSync(filePath);
+        if (data.type === 'message' && data.text) {
+          messages.push(data.text);
+        }
+      } catch (err) {
+        log(`Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`);
+        try { fs.unlinkSync(filePath); } catch { /* ignore */ }
       }
     }
-  } catch (err: any) {
-    log(`Chat error: ${err.message}`);
-    writeOutput({
-      status: 'error',
-      result: null,
-      error: err.message
-    });
+    return messages;
+  } catch (err) {
+    log(`IPC drain error: ${err instanceof Error ? err.message : String(err)}`);
+    return [];
   }
+}
+
+/**
+ * Wait for a new IPC message or _close sentinel.
+ * Returns the messages as a single string, or null if _close.
+ */
+function waitForIpcMessage(): Promise<string | null> {
+  return new Promise((resolve) => {
+    const poll = () => {
+      if (shouldClose()) {
+        resolve(null);
+        return;
+      }
+      const messages = drainIpcInput();
+      if (messages.length > 0) {
+        resolve(messages.join('\n'));
+        return;
+      }
+      setTimeout(poll, IPC_POLL_MS);
+    };
+    poll();
+  });
+}
+
+/**
+ * Run a single query and stream results via writeOutput.
+ * Uses MessageStream (AsyncIterable) to keep isSingleUserTurn=false,
+ * allowing agent teams subagents to run to completion.
+ * Also pipes IPC messages into the stream during the query.
+ */
+async function runQuery(
+  prompt: string,
+  sessionId: string | undefined,
+  mcpServerPath: string,
+  containerInput: ContainerInput,
+  sdkEnv: Record<string, string | undefined>,
+  resumeAt?: string,
+): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
+  const stream = new MessageStream();
+  stream.push(prompt);
+
+  // Poll IPC for follow-up messages and _close sentinel during the query
+  let ipcPolling = true;
+  let closedDuringQuery = false;
+  const pollIpcDuringQuery = () => {
+    if (!ipcPolling) return;
+    if (shouldClose()) {
+      log('Close sentinel detected during query, ending stream');
+      closedDuringQuery = true;
+      stream.end();
+      ipcPolling = false;
+      return;
+    }
+    const messages = drainIpcInput();
+    for (const text of messages) {
+      log(`Piping IPC message into active query (${text.length} chars)`);
+      stream.push(text);
+    }
+    setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
+  };
+  setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
+
+  let newSessionId: string | undefined;
+  let lastAssistantUuid: string | undefined;
+  let messageCount = 0;
+  let resultCount = 0;
+
+  // Load global CLAUDE.md as additional system context (shared across all groups)
+  const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
+  let globalClaudeMd: string | undefined;
+  if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
+    globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
+  }
+
+  // Discover additional directories mounted at /workspace/extra/*
+  // These are passed to the SDK so their CLAUDE.md files are loaded automatically
+  const extraDirs: string[] = [];
+  const extraBase = '/workspace/extra';
+  if (fs.existsSync(extraBase)) {
+    for (const entry of fs.readdirSync(extraBase)) {
+      const fullPath = path.join(extraBase, entry);
+      if (fs.statSync(fullPath).isDirectory()) {
+        extraDirs.push(fullPath);
+      }
+    }
+  }
+  if (extraDirs.length > 0) {
+    log(`Additional directories: ${extraDirs.join(', ')}`);
+  }
+
+  for await (const message of query({
+    prompt: stream,
+    options: {
+      cwd: '/workspace/group',
+      additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
+      resume: sessionId,
+      resumeSessionAt: resumeAt,
+      systemPrompt: globalClaudeMd
+        ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd }
+        : undefined,
+      allowedTools: [
+        'Bash',
+        'Read', 'Write', 'Edit', 'Glob', 'Grep',
+        'WebSearch', 'WebFetch',
+        'Task', 'TaskOutput', 'TaskStop',
+        'TeamCreate', 'TeamDelete', 'SendMessage',
+        'TodoWrite', 'ToolSearch', 'Skill',
+        'NotebookEdit',
+        'mcp__nanoclaw__*'
+      ],
+      env: sdkEnv,
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
+      settingSources: ['project', 'user'],
+      mcpServers: {
+        nanoclaw: {
+          command: 'node',
+          args: [mcpServerPath],
+          env: {
+            NANOCLAW_CHAT_JID: containerInput.chatJid,
+            NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
+            NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+          },
+        },
+      },
+      hooks: {
+        PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
+        PreToolUse: [{ matcher: 'Bash', hooks: [createSanitizeBashHook()] }],
+      },
+    }
+  })) {
+    messageCount++;
+    const msgType = message.type === 'system' ? `system/${(message as { subtype?: string }).subtype}` : message.type;
+    log(`[msg #${messageCount}] type=${msgType}`);
+
+    if (message.type === 'assistant' && 'uuid' in message) {
+      lastAssistantUuid = (message as { uuid: string }).uuid;
+    }
+
+    if (message.type === 'system' && message.subtype === 'init') {
+      newSessionId = message.session_id;
+      log(`Session initialized: ${newSessionId}`);
+    }
+
+    if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
+      const tn = message as { task_id: string; status: string; summary: string };
+      log(`Task notification: task=${tn.task_id} status=${tn.status} summary=${tn.summary}`);
+    }
+
+    if (message.type === 'result') {
+      resultCount++;
+      const textResult = 'result' in message ? (message as { result?: string }).result : null;
+      log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
+      writeOutput({
+        status: 'success',
+        result: textResult || null,
+        newSessionId
+      });
+    }
+  }
+
+  ipcPolling = false;
+  log(`Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`);
+  return { newSessionId, lastAssistantUuid, closedDuringQuery };
 }
 
 async function main(): Promise<void> {
-  const stdinData = await new Promise<string>((resolve) => {
-    let data = '';
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', chunk => data += chunk);
-    process.stdin.on('end', () => resolve(data));
-  });
+  let containerInput: ContainerInput;
 
-  const input: ContainerInput = JSON.parse(stdinData);
-  const apiKey = input.secrets?.GEMINI_API_KEY;
-  if (!apiKey) {
-    writeOutput({ status: 'error', result: null, error: 'GEMINI_API_KEY missing' });
+  try {
+    const stdinData = await readStdin();
+    containerInput = JSON.parse(stdinData);
+    // Delete the temp file the entrypoint wrote — it contains secrets
+    try { fs.unlinkSync('/tmp/input.json'); } catch { /* may not exist */ }
+    log(`Received input for group: ${containerInput.groupFolder}`);
+  } catch (err) {
+    writeOutput({
+      status: 'error',
+      result: null,
+      error: `Failed to parse input: ${err instanceof Error ? err.message : String(err)}`
+    });
     process.exit(1);
   }
 
-  const ai = new GoogleGenerativeAI(apiKey);
-  await runChatLoop(ai, input);
+  // Determine backend: prefer Claude if key present, else Gemini
+  const secrets = containerInput.secrets as Record<string, string> | undefined;
+  const hasAnthropicKey = !!(secrets?.ANTHROPIC_API_KEY || secrets?.CLAUDE_CODE_OAUTH_TOKEN);
+  const hasGeminiKey = !!secrets?.GEMINI_API_KEY;
+
+  if (!hasAnthropicKey && hasGeminiKey) {
+    log('No Anthropic key found, using Gemini directly');
+    const prompt = containerInput.isScheduledTask
+      ? `[SCHEDULED TASK]
+
+${containerInput.prompt}`
+      : containerInput.prompt;
+    await runGeminiFallback(containerInput, prompt);
+    return;
+  }
+
+  // Build SDK env: merge secrets into process.env for the SDK only.
+  // Secrets never touch process.env itself, so Bash subprocesses can't see them.
+  const sdkEnv: Record<string, string | undefined> = { ...process.env };
+  for (const [key, value] of Object.entries(containerInput.secrets || {})) {
+    sdkEnv[key] = value;
+  }
+
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const mcpServerPath = path.join(__dirname, 'ipc-mcp-stdio.js');
+
+  let sessionId = containerInput.sessionId;
+  fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
+
+  // Clean up stale _close sentinel from previous container runs
+  try { fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL); } catch { /* ignore */ }
+
+  // Build initial prompt (drain any pending IPC messages too)
+  let prompt = containerInput.prompt;
+  if (containerInput.isScheduledTask) {
+    prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
+  }
+  const pending = drainIpcInput();
+  if (pending.length > 0) {
+    log(`Draining ${pending.length} pending IPC messages into initial prompt`);
+    prompt += '\n' + pending.join('\n');
+  }
+
+  // Query loop: run query → wait for IPC message → run new query → repeat
+  let resumeAt: string | undefined;
+  try {
+    while (true) {
+      log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
+
+      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
+      if (queryResult.newSessionId) {
+        sessionId = queryResult.newSessionId;
+      }
+      if (queryResult.lastAssistantUuid) {
+        resumeAt = queryResult.lastAssistantUuid;
+      }
+
+      // If _close was consumed during the query, exit immediately.
+      if (queryResult.closedDuringQuery) {
+        log('Close sentinel consumed during query, exiting');
+        break;
+      }
+
+      // Emit session update so host can track it
+      writeOutput({ status: 'success', result: null, newSessionId: sessionId });
+
+      log('Query ended, waiting for next IPC message...');
+
+      // Wait for the next message or _close sentinel
+      const nextMessage = await waitForIpcMessage();
+      if (nextMessage === null) {
+        log('Close sentinel received, exiting');
+        break;
+      }
+
+      log(`Got new message (${nextMessage.length} chars), starting new query`);
+      prompt = nextMessage;
+    }
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    log(`Claude error: ${errorMessage}`);
+
+    // Fallback to Gemini if Claude fails and Gemini key is available
+    if (hasGeminiKey) {
+      log('Falling back to Gemini...');
+      try {
+        await runGeminiFallback(containerInput, prompt);
+        return;
+      } catch (geminiErr) {
+        log(`Gemini fallback also failed: ${geminiErr instanceof Error ? geminiErr.message : String(geminiErr)}`);
+      }
+    }
+
+    writeOutput({
+      status: 'error',
+      result: null,
+      newSessionId: sessionId,
+      error: errorMessage
+    });
+    process.exit(1);
+  }
 }
 
-main().catch(err => {
-  log(`Fatal error: ${err}`);
-  process.exit(1);
-});
+// ---------------------------------------------------------------------------
+// Gemini fallback: used when Claude SDK is unavailable or errors
+// ---------------------------------------------------------------------------
+async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: string): Promise<void> {
+  const apiKey = (containerInput.secrets as Record<string, string> | undefined)?.GEMINI_API_KEY;
+  if (!apiKey) {
+    writeOutput({ status: 'error', result: null, error: 'No GEMINI_API_KEY available for fallback' });
+    return;
+  }
+
+  log('Switching to Gemini 2.5 Flash fallback...');
+
+  const ai = new GoogleGenAI({ apiKey });
+
+  const tools = [
+    {
+      name: 'bash',
+      description: 'Run a bash command in the workspace',
+      parameters: {
+        type: 'object',
+        properties: { command: { type: 'string', description: 'Shell command to run' } },
+        required: ['command'],
+      },
+    },
+    {
+      name: 'send_message',
+      description: 'Send a message back to the user immediately',
+      parameters: {
+        type: 'object',
+        properties: { text: { type: 'string', description: 'Message text to send' } },
+        required: ['text'],
+      },
+    },
+    {
+      name: 'read_file',
+      description: 'Read a file from the workspace',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string', description: 'Absolute file path' } },
+        required: ['path'],
+      },
+    },
+    {
+      name: 'write_file',
+      description: 'Write content to a file in the workspace',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Absolute file path' },
+          content: { type: 'string', description: 'File content' },
+        },
+        required: ['path', 'content'],
+      },
+    },
+  ];
+
+  // Read system prompt from GEMINI.md or CLAUDE.md if available
+  let systemInstruction = 'You are a helpful AI assistant. You have access to bash, file operations, and can send messages back to the user.';
+  for (const name of ['GEMINI.md', 'CLAUDE.md']) {
+    const p = `/workspace/group/${name}`;
+    if (fs.existsSync(p)) { systemInstruction = fs.readFileSync(p, 'utf-8'); break; }
+  }
+
+  const chat = ai.chats.create({
+    model: 'gemini-2.5-flash',
+    config: {
+      systemInstruction,
+      // @ts-ignore — tools shape accepted at runtime
+      tools: [{ functionDeclarations: tools }],
+    },
+  });
+
+  let userMessage: string | object = initialPrompt;
+  const MAX_TURNS = 20;
+
+  for (let turn = 0; turn < MAX_TURNS; turn++) {
+    let resp;
+    try {
+      // @ts-ignore
+      resp = await chat.sendMessage({ message: userMessage });
+    } catch (err) {
+      writeOutput({ status: 'error', result: null, error: `Gemini error: ${err instanceof Error ? err.message : String(err)}` });
+      return;
+    }
+
+    // Extract text
+    const text: string = (resp as any).text ?? '';
+    // @ts-ignore
+    const fnCalls: Array<{ name: string; args: Record<string, unknown>; id?: string }> = (resp as any).functionCalls ?? [];
+
+    if (!fnCalls.length) {
+      // Final text answer — deliver and exit
+      writeOutput({ status: 'success', result: text || '(no response)' });
+      return;
+    }
+
+    // Execute tool calls
+    const fnResponses: object[] = [];
+    for (const fn of fnCalls) {
+      let result = '';
+      try {
+        const args = fn.args as Record<string, string>;
+        if (fn.name === 'bash') {
+          result = execSync(args.command, { cwd: '/workspace/group', timeout: 30000 }).toString();
+        } else if (fn.name === 'send_message') {
+          const ipcFile = `/workspace/ipc/messages/gemini_${Date.now()}.json`;
+          fs.writeFileSync(ipcFile, JSON.stringify({ type: 'message', chatJid: containerInput.chatJid, text: args.text }));
+          result = 'Message sent';
+        } else if (fn.name === 'read_file') {
+          result = fs.existsSync(args.path) ? fs.readFileSync(args.path, 'utf-8') : 'File not found';
+        } else if (fn.name === 'write_file') {
+          fs.mkdirSync(path.dirname(args.path), { recursive: true });
+          fs.writeFileSync(args.path, args.content);
+          result = 'File written';
+        }
+      } catch (err) {
+        result = `Error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      fnResponses.push({
+        functionResponse: { ...(fn.id ? { id: fn.id } : {}), name: fn.name, response: { result: result.slice(0, 4000) } },
+      });
+    }
+
+    if (shouldClose()) break;
+    const ipcMessages = drainIpcInput();
+    if (ipcMessages.length > 0) {
+      // Append IPC messages as extra user text alongside tool results
+      fnResponses.push({ text: ipcMessages.join('\n') } as object);
+    }
+    userMessage = fnResponses;
+  }
+
+  writeOutput({ status: 'success', result: 'Done' });
+}
+
+main();

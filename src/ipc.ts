@@ -465,6 +465,50 @@ export async function processTaskIpc(
       }
       break;
 
+    case 'telegram_escalate': {
+      // Forward client escalation to the admin Telegram chat.
+      // chatJid can be provided explicitly, or we auto-resolve from sourceGroup.
+      const clientJid =
+        data.chatJid ||
+        Object.entries(registeredGroups).find(([, g]) => g.folder === sourceGroup)?.[0];
+
+      const adminEntry = Object.entries(registeredGroups).find(
+        ([, g]) => g.folder === MAIN_GROUP_FOLDER,
+      );
+      if (!adminEntry) {
+        logger.warn({ sourceGroup }, 'telegram_escalate: no admin group registered');
+        if (clientJid) {
+          await deps.sendMessage(
+            clientJid,
+            '⚠️ Could not reach admin — no admin channel configured.',
+          );
+        }
+        break;
+      }
+      const adminJid = adminEntry[0];
+      const clientGroup = clientJid ? registeredGroups[clientJid] : undefined;
+      const clientLabel = clientGroup?.name || clientJid || `group: ${sourceGroup}`;
+      const escalationMsg =
+        `🚨 <b>Client Escalation</b>\n\n` +
+        `<b>From:</b> ${clientLabel}\n` +
+        `<b>Chat ID:</b> <code>${clientJid}</code>\n` +
+        `<b>Issue:</b> ${data.reason || 'Needs admin support'}\n\n` +
+        `To reply, tell @Andy:\n` +
+        `<i>Reply to client ${clientJid}: [your message here]</i>`;
+      await deps.sendMessage(adminJid, escalationMsg);
+      logger.info(
+        { sourceGroup, adminJid, clientJid },
+        'Telegram escalation forwarded to admin',
+      );
+      if (clientJid) {
+        await deps.sendMessage(
+          clientJid,
+          '✅ Your request has been forwarded to our support team. You\'ll hear back shortly!',
+        );
+      }
+      break;
+    }
+
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
   }

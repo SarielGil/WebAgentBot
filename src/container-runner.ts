@@ -12,6 +12,7 @@ import {
   CONTAINER_TIMEOUT,
   DATA_DIR,
   GROUPS_DIR,
+  HOST_PROJECT_ROOT,
   IDLE_TIMEOUT,
   TIMEZONE,
 } from './config.js';
@@ -29,6 +30,22 @@ import { RegisteredGroup } from './types.js';
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+
+/**
+ * Translate an orchestrator-internal path to the equivalent HOST path.
+ * When running in Docker (DooD), process.cwd() is e.g. /app but the Docker
+ * daemon on the host needs the real macOS/host path for volume mounts.
+ */
+function toHostPath(containerInternalPath: string): string {
+  const containerRoot = process.cwd();
+  if (
+    HOST_PROJECT_ROOT !== containerRoot &&
+    containerInternalPath.startsWith(containerRoot)
+  ) {
+    return HOST_PROJECT_ROOT + containerInternalPath.slice(containerRoot.length);
+  }
+  return containerInternalPath;
+}
 
 export interface ContainerInput {
   prompt: string;
@@ -71,21 +88,21 @@ function buildVolumeMounts(
     // (src/, dist/, package.json, etc.) which would bypass the sandbox
     // entirely on next restart.
     mounts.push({
-      hostPath: projectRoot,
+      hostPath: toHostPath(projectRoot),
       containerPath: '/workspace/project',
       readonly: true,
     });
 
     // Main also gets its group folder as the working directory
     mounts.push({
-      hostPath: groupDir,
+      hostPath: toHostPath(groupDir),
       containerPath: '/workspace/group',
       readonly: false,
     });
   } else {
     // Other groups only get their own folder
     mounts.push({
-      hostPath: groupDir,
+      hostPath: toHostPath(groupDir),
       containerPath: '/workspace/group',
       readonly: false,
     });
@@ -95,7 +112,7 @@ function buildVolumeMounts(
     const globalDir = path.join(GROUPS_DIR, 'global');
     if (fs.existsSync(globalDir)) {
       mounts.push({
-        hostPath: globalDir,
+        hostPath: toHostPath(globalDir),
         containerPath: '/workspace/global',
         readonly: true,
       });
@@ -106,7 +123,7 @@ function buildVolumeMounts(
   const mediaDir = path.resolve(DATA_DIR, 'media');
   if (fs.existsSync(mediaDir)) {
     mounts.push({
-      hostPath: mediaDir,
+      hostPath: toHostPath(mediaDir),
       containerPath: '/workspace/media',
       readonly: true,
     });
@@ -157,7 +174,7 @@ function buildVolumeMounts(
     }
   }
   mounts.push({
-    hostPath: groupSessionsDir,
+    hostPath: toHostPath(groupSessionsDir),
     containerPath: '/home/node/.claude',
     readonly: false,
   });
@@ -169,7 +186,7 @@ function buildVolumeMounts(
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
   mounts.push({
-    hostPath: groupIpcDir,
+    hostPath: toHostPath(groupIpcDir),
     containerPath: '/workspace/ipc',
     readonly: false,
   });
@@ -193,7 +210,7 @@ function buildVolumeMounts(
     fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
   }
   mounts.push({
-    hostPath: groupAgentRunnerDir,
+    hostPath: toHostPath(groupAgentRunnerDir),
     containerPath: '/app/src',
     readonly: false,
   });
@@ -216,7 +233,7 @@ function buildVolumeMounts(
  * Secrets are never written to disk or mounted as files.
  */
 function readSecrets(): Record<string, string> {
-  return readEnvFile(['GEMINI_API_KEY', 'GITHUB_TOKEN', 'BRAVE_API_KEY']);
+  return readEnvFile(['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'GEMINI_API_KEY', 'GITHUB_TOKEN', 'BRAVE_API_KEY']);
 }
 
 function buildContainerArgs(

@@ -1,0 +1,10 @@
+node_modules
+dist
+data
+store
+groups
+.env
+*.log
+.git
+.vscode
+.gemini

@@ -568,7 +568,23 @@ async function main(): Promise<void> {
 
   // Channel callbacks (shared by all channels)
   const channelOpts = {
-    onMessage: (_chatJid: string, msg: NewMessage) => storeMessage(msg),
+    onMessage: (_chatJid: string, msg: NewMessage) => {
+      // Auto-register new Telegram chats (unknown numeric IDs) as client1
+      // Also handles client-bot namespaced JIDs like 'c:<chatId>'
+      if (!registeredGroups[_chatJid] && /^(c:)?-?\d+$/.test(_chatJid)) {
+        logger.info({ chatJid: _chatJid }, 'Auto-registering new Telegram chat as client');
+        const newGroup: RegisteredGroup = {
+          name: `Client ${_chatJid}`,
+          folder: 'client1',
+          trigger: '@Support',
+          added_at: new Date().toISOString(),
+          requiresTrigger: false,
+        };
+        setRegisteredGroup(_chatJid, newGroup);
+        registeredGroups[_chatJid] = newGroup;
+      }
+      storeMessage(msg);
+    },
     onChatMetadata: (
       chatJid: string,
       timestamp: string,

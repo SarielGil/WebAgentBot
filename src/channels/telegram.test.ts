@@ -3,17 +3,19 @@ import { TelegramChannel } from './telegram.js';
 import { Bot } from 'grammy';
 
 vi.mock('grammy', () => {
+    class MockBot {
+        constructor() {}
+        on = vi.fn();
+        api = {
+            getFile: vi.fn(),
+            sendMessage: vi.fn(),
+        };
+        start = vi.fn();
+        stop = vi.fn();
+        catch = vi.fn();
+    }
     return {
-        Bot: vi.fn().mockImplementation(() => ({
-            on: vi.fn(),
-            api: {
-                getFile: vi.fn(),
-                sendMessage: vi.fn(),
-            },
-            start: vi.fn(),
-            stop: vi.fn(),
-            catch: vi.fn(),
-        })),
+        Bot: MockBot,
     };
 });
 
