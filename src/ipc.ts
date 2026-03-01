@@ -13,6 +13,8 @@ import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
+import { githubService, domainService } from './index.js';
+import { slackChannel } from './index.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
@@ -170,6 +172,15 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    // For GitHub
+    repoName?: string;
+    repoDescription?: string;
+    // For Slack
+    reason?: string;
+    // For Domain
+    domain?: string;
+    // For Search
+    query?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -378,6 +389,50 @@ export async function processTaskIpc(
           { data },
           'Invalid register_group request - missing required fields',
         );
+      }
+      break;
+
+    case 'github_create_repo':
+      if (data.repoName) {
+        try {
+          const url = await githubService.createRepo(data.repoName, data.repoDescription);
+          await deps.sendMessage(data.chatJid!, `✅ GitHub Repository created: ${url}`);
+        } catch (err) {
+          logger.error({ err }, 'IPC github_create_repo failed');
+          await deps.sendMessage(data.chatJid!, `❌ Failed to create GitHub repository: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      break;
+
+    case 'domain_check':
+      if (data.domain) {
+        const available = await domainService.isAvailable(data.domain);
+        await deps.sendMessage(data.chatJid!, `🔎 Domain *${data.domain}* availability: ${available ? '✅ Available' : '❌ Taken'}`);
+      }
+      break;
+
+    case 'web_search':
+      if (data.query) {
+        try {
+          const results = await googleIt({ query: data.query, 'no-display': true, limit: 5 });
+          const summary = results.map((r: any) => `[${r.title}](${r.link}): ${r.snippet}`).join('\n\n');
+          await deps.sendMessage(data.chatJid!, `🔍 Search results for "${data.query}":\n\n${summary}`);
+        } catch (err) {
+          logger.error({ err }, 'IPC web_search failed');
+          await deps.sendMessage(data.chatJid!, `❌ Failed to search: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      break;
+
+    case 'slack_escalate':
+      if (data.reason) {
+        const group = registeredGroups[data.chatJid!];
+        const success = await slackChannel.sendEscalation(data.chatJid!, group?.name || 'Unknown User', data.reason);
+        if (success) {
+          await deps.sendMessage(data.chatJid!, `🚨 Admin has been notified. They will get back to you soon.`);
+        } else {
+          await deps.sendMessage(data.chatJid!, `⚠️ Failed to notify admin via Slack. Please try again later.`);
+        }
       }
       break;
 

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{TITLE}}</title>
+    <meta name="description" content="{{DESCRIPTION}}">
+    
+    <!-- SEO / AEO Best Practices -->
+    <meta name="keywords" content="{{KEYWORDS}}">
+    <meta name="author" content="Webbot Builder">
+    <link rel="canonical" href="{{CANONICAL_URL}}">
+    
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="{{CANONICAL_URL}}">
+    <meta property="og:title" content="{{TITLE}}">
+    <meta property="og:description" content="{{DESCRIPTION}}">
+    <meta property="og:image" content="{{OG_IMAGE}}">
+
+    <!-- Twitter -->
+    <meta property="twitter:card" content="summary_large_image">
+    <meta property="twitter:url" content="{{CANONICAL_URL}}">
+    <meta property="twitter:title" content="{{TITLE}}">
+    <meta property="twitter:description" content="{{DESCRIPTION}}">
+    <meta property="twitter:image" content="{{OG_IMAGE}}">
+
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    
+    <link rel="stylesheet" href="css/style.css">
+    
+    <!-- reCAPTCHA v3 -->
+    <script src="https://www.google.com/recaptcha/api.js?render={{RECAPTCHA_SITE_KEY}}"></script>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <nav>
+                <a href="index.html" class="logo">{{BRAND_NAME}}</a>
+                <ul>
+                    <li><a href="#about">About</a></li>
+                    <li><a href="#services">Services</a></li>
+                    <li><a href="#contact">Contact</a></li>
+                </ul>
+            </nav>
+        </div>
+    </header>
+
+    <main>
+        <section id="hero">
+            <div class="container">
+                <h1>{{HERO_TITLE}}</h1>
+                <p>{{HERO_SUBTITLE}}</p>
+                <a href="#contact" class="btn">Get Started</a>
+            </div>
+        </section>
+
+        <section id="about">
+            <div class="container">
+                <h2>About Us</h2>
+                <p>{{ABOUT_TEXT}}</p>
+            </div>
+        </section>
+
+        <section id="contact">
+            <div class="container">
+                <h2>Contact Us</h2>
+                <form id="contact-form">
+                    <input type="text" name="name" placeholder="Your Name" required>
+                    <input type="email" name="email" placeholder="Your Email" required>
+                    <textarea name="message" placeholder="Your Message" required></textarea>
+                    <button type="submit" class="btn">Send Message</button>
+                </form>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>&copy; <span id="year"></span> {{BRAND_NAME}}. All rights reserved.</p>
+        </div>
+    </footer>
+
+    <script src="js/main.js"></script>
+    <script>
+        document.getElementById('year').textContent = new Date().getFullYear();
+        
+        // Example reCAPTCHA execution
+        document.getElementById('contact-form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            grecaptcha.ready(function() {
+                grecaptcha.execute('{{RECAPTCHA_SITE_KEY}}', {action: 'submit'}).then(function(token) {
+                    console.log('reCAPTCHA token:', token);
+                    alert('Form submitted! (Simulation)');
+                });
+            });
+        });
+    </script>
+</body>
+</html>

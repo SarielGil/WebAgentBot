@@ -8,7 +8,7 @@ import {
   POLL_INTERVAL,
   TRIGGER_PATTERN,
 } from './config.js';
-import { WhatsAppChannel } from './channels/whatsapp.js';
+import { TelegramChannel } from './channels/telegram.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -39,6 +39,9 @@ import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
+import { GitHubService } from './services/github.js';
+import { SlackChannel } from './channels/slack.js';
+import { DomainService } from './services/domain.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -51,7 +54,10 @@ let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
-let whatsapp: WhatsAppChannel;
+let telegram: TelegramChannel;
+export let githubService: GitHubService;
+export let slackChannel: SlackChannel;
+export let domainService: DomainService;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 
@@ -281,12 +287,12 @@ async function runAgent(
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
-        if (output.newSessionId) {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
-        }
-        await onOutput(output);
+      if (output.newSessionId) {
+        sessions[group.folder] = output.newSessionId;
+        setSession(group.folder, output.newSessionId);
       }
+      await onOutput(output);
+    }
     : undefined;
 
   try {
@@ -449,6 +455,9 @@ async function main(): Promise<void> {
   ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');
+  githubService = new GitHubService();
+  slackChannel = new SlackChannel();
+  domainService = new DomainService();
   loadState();
 
   // Graceful shutdown handlers
@@ -475,9 +484,9 @@ async function main(): Promise<void> {
   };
 
   // Create and connect channels
-  whatsapp = new WhatsAppChannel(channelOpts);
-  channels.push(whatsapp);
-  await whatsapp.connect();
+  telegram = new TelegramChannel(channelOpts);
+  channels.push(telegram);
+  await telegram.connect();
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
@@ -505,7 +514,7 @@ async function main(): Promise<void> {
     registeredGroups: () => registeredGroups,
     registerGroup,
     syncGroupMetadata: (force) =>
-      whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
+      Promise.resolve(),
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
@@ -522,7 +531,7 @@ async function main(): Promise<void> {
 const isDirectRun =
   process.argv[1] &&
   new URL(import.meta.url).pathname ===
-    new URL(`file://${process.argv[1]}`).pathname;
+  new URL(`file://${process.argv[1]}`).pathname;
 
 if (isDirectRun) {
   main().catch((err) => {
