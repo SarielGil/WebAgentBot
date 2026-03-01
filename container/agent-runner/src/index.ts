@@ -510,13 +510,13 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Determine backend: prefer Claude if key present, else Gemini
+  // Determine backend: prefer Gemini if key present, else fall back to Claude
   const secrets = containerInput.secrets as Record<string, string> | undefined;
   const hasAnthropicKey = !!(secrets?.ANTHROPIC_API_KEY || secrets?.CLAUDE_CODE_OAUTH_TOKEN);
   const hasGeminiKey = !!secrets?.GEMINI_API_KEY;
 
-  if (!hasAnthropicKey && hasGeminiKey) {
-    log('No Anthropic key found, using Gemini directly');
+  if (hasGeminiKey) {
+    log('Gemini key found, using Gemini as default backend');
     const prompt = containerInput.isScheduledTask
       ? `[SCHEDULED TASK]
 
@@ -524,6 +524,11 @@ ${containerInput.prompt}`
       : containerInput.prompt;
     await runGeminiFallback(containerInput, prompt);
     return;
+  }
+
+  if (!hasAnthropicKey) {
+    writeOutput({ status: 'error', result: null, error: 'No AI backend key found (GEMINI_API_KEY or ANTHROPIC_API_KEY required)' });
+    process.exit(1);
   }
 
   // Build SDK env: merge secrets into process.env for the SDK only.
