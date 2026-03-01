@@ -48,7 +48,7 @@ export class GitHubService {
         }
     }
 
-    async pushFiles(owner: string, repo: string, files: Array<{ path: string; content: string }>, message: string = 'Initial website backbone'): Promise<void> {
+    async pushFiles(owner: string, repo: string, files: Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }>, message: string = 'Initial website backbone'): Promise<void> {
         try {
             // For simplicity, we assume we're pushing to the default branch (usually main)
             const { data: repoData } = await this.octokit.repos.get({ owner, repo });
@@ -77,7 +77,7 @@ export class GitHubService {
                         owner,
                         repo,
                         content: f.content,
-                        encoding: 'utf-8',
+                        encoding: f.encoding || 'utf-8',
                     });
                     return {
                         path: f.path,

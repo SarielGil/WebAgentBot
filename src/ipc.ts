@@ -176,6 +176,7 @@ export async function processTaskIpc(
     // For GitHub
     repoName?: string;
     repoDescription?: string;
+    branch?: string;
     // For Slack
     reason?: string;
     // For Domain
@@ -428,8 +429,6 @@ export async function processTaskIpc(
     case 'github_push':
       if (data.repoName && (data as any).files) {
         try {
-          const owner = (githubService as any).octokit.auth.split('_')[0]; // This is a hack, usually we need the owner. 
-          // Actually, let's just assume authenticated user is the owner for now or get it from git service.
           const { data: user } = await (githubService as any).octokit.users.getAuthenticated();
           await githubService.pushFiles(user.login, data.repoName, (data as any).files, (data as any).message);
           await deps.sendMessage(data.chatJid!, `✅ Files pushed to GitHub repository: ${data.repoName}`);
@@ -444,8 +443,9 @@ export async function processTaskIpc(
       if (data.repoName) {
         try {
           const { data: user } = await (githubService as any).octokit.users.getAuthenticated();
-          await githubService.enablePages(user.login, data.repoName);
-          await deps.sendMessage(data.chatJid!, `🚀 GitHub Pages enabled for ${data.repoName}. It will be live soon!`);
+          const branch: string = (data as any).branch || 'main';
+          await githubService.enablePages(user.login, data.repoName, branch);
+          await deps.sendMessage(data.chatJid!, `🚀 GitHub Pages enabled for *${data.repoName}* (branch: ${branch}). It will be live at https://${user.login}.github.io/${data.repoName}/ shortly!`);
         } catch (err) {
           logger.error({ err }, 'IPC github_pages failed');
           await deps.sendMessage(data.chatJid!, `❌ Failed to enable GitHub Pages: ${err instanceof Error ? err.message : String(err)}`);

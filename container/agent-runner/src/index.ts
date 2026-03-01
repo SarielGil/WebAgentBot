@@ -143,7 +143,58 @@ const tools: Tool[] = [
           },
           required: ['query'],
         },
-      }
+      },
+      {
+        name: 'github_push',
+        description: 'Push one or more text or base64-encoded files to a GitHub repository.',
+        parameters: {
+          type: SchemaType.OBJECT,
+          properties: {
+            repoName: { type: SchemaType.STRING, description: 'The repository name (must already exist)' },
+            files: {
+              type: SchemaType.ARRAY,
+              description: 'Array of files to push',
+              items: {
+                type: SchemaType.OBJECT,
+                properties: {
+                  path: { type: SchemaType.STRING, description: 'Path inside the repo (e.g. index.html)' },
+                  content: { type: SchemaType.STRING, description: 'File content (UTF-8 text or base64 for binary)' },
+                  encoding: { type: SchemaType.STRING, description: 'Encoding: "utf-8" (default) or "base64"' },
+                },
+                required: ['path', 'content'],
+              },
+            },
+            message: { type: SchemaType.STRING, description: 'Commit message' },
+          },
+          required: ['repoName', 'files'],
+        },
+      },
+      {
+        name: 'github_pages',
+        description: 'Enable GitHub Pages for a repository, deploying from the main branch.',
+        parameters: {
+          type: SchemaType.OBJECT,
+          properties: {
+            repoName: { type: SchemaType.STRING, description: 'The repository name' },
+            branch: { type: SchemaType.STRING, description: 'Branch to deploy from (default: main)' },
+          },
+          required: ['repoName'],
+        },
+      },
+      {
+        name: 'upload_photo_to_github',
+        description: 'Upload a photo (received from the user via chat) to a GitHub repository.',
+        parameters: {
+          type: SchemaType.OBJECT,
+          properties: {
+            repoName: { type: SchemaType.STRING, description: 'The repository name' },
+            photoPath: { type: SchemaType.STRING, description: 'Absolute path of the photo inside the container (e.g. /workspace/media/photo.jpg)' },
+            destPath: { type: SchemaType.STRING, description: 'Destination path inside the repo (e.g. images/photo.jpg)' },
+            message: { type: SchemaType.STRING, description: 'Commit message' },
+          },
+          required: ['repoName', 'photoPath', 'destPath'],
+        },
+      },
     ],
   },
 ];
@@ -180,13 +231,19 @@ async function handleToolCall(name: string, args: any, input: ContainerInput): P
       });
       return { success: true, message: 'Escalation sent to admin.' };
 
-    case 'bash':
+    case 'bash': {
       try {
-        const stdout = execSync(args.command, { encoding: 'utf-8', timeout: 30000 });
+        // Inject secrets as environment variables so the agent can use git, curl, etc.
+        const env: Record<string, string> = { ...(process.env as Record<string, string>) };
+        if (input.secrets?.GITHUB_TOKEN) env.GITHUB_TOKEN = input.secrets.GITHUB_TOKEN;
+        if (input.secrets?.BRAVE_API_KEY) env.BRAVE_API_KEY = input.secrets.BRAVE_API_KEY;
+        if (input.secrets?.GEMINI_API_KEY) env.GEMINI_API_KEY = input.secrets.GEMINI_API_KEY;
+        const stdout = execSync(args.command, { encoding: 'utf-8', timeout: 60000, env });
         return { stdout };
       } catch (err: any) {
         return { error: err.message, stderr: err.stderr, stdout: err.stdout };
       }
+    }
 
     case 'read_file':
       try {
@@ -222,6 +279,45 @@ async function handleToolCall(name: string, args: any, input: ContainerInput): P
         timestamp: new Date().toISOString()
       });
       return { success: true, message: 'Web search request sent to host.' };
+
+    case 'github_push':
+      writeIpcFile(TASKS_DIR, {
+        type: 'github_push',
+        chatJid: input.chatJid,
+        repoName: args.repoName,
+        files: args.files,
+        message: args.message || 'Update from NanoClaw agent',
+        timestamp: new Date().toISOString()
+      });
+      return { success: true, message: 'GitHub push request sent to host.' };
+
+    case 'github_pages':
+      writeIpcFile(TASKS_DIR, {
+        type: 'github_pages',
+        chatJid: input.chatJid,
+        repoName: args.repoName,
+        branch: args.branch || 'main',
+        timestamp: new Date().toISOString()
+      });
+      return { success: true, message: 'GitHub Pages enable request sent to host.' };
+
+    case 'upload_photo_to_github': {
+      try {
+        const photoContent = fs.readFileSync(args.photoPath);
+        const base64Content = photoContent.toString('base64');
+        writeIpcFile(TASKS_DIR, {
+          type: 'github_push',
+          chatJid: input.chatJid,
+          repoName: args.repoName,
+          files: [{ path: args.destPath, content: base64Content, encoding: 'base64' }],
+          message: args.message || `Upload photo: ${args.destPath}`,
+          timestamp: new Date().toISOString()
+        });
+        return { success: true, message: 'Photo upload request sent to host.' };
+      } catch (err: any) {
+        return { error: `Failed to read photo: ${err.message}` };
+      }
+    }
 
     default:
       return { error: `Tool ${name} not implemented` };
