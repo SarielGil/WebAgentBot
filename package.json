@@ -1,6 +1,6 @@
 {
   "name": "webbot-builder",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Telegram-based chatbot orchestrator for automated website building and GitHub repo creation.",
   "type": "module",
   "main": "dist/index.js",
