@@ -268,7 +268,7 @@ async function processGroupMessages(queueKey: string): Promise<boolean> {
   if (!isMainGroup && group.requiresTrigger !== false) {
     const groupTriggerPattern = makeGroupTriggerPattern(group.trigger);
     const hasTrigger = missedMessages.some((m) =>
-      groupTriggerPattern.test(m.content.trim()),
+      groupTriggerPattern.test((m.content || '').trim()),
     );
     if (!hasTrigger) return true;
   }
@@ -321,7 +321,7 @@ async function processGroupMessages(queueKey: string): Promise<boolean> {
   const session = sessions[group.folder] || { sessionId: '' };
 
   // If missedMessages is long (e.g. > 15), trigger a summarization turn
-  if (missedMessages.length > 20) {
+  if (missedMessages.length > 12) {
     logger.info({ group: group.name }, 'Deep history detected, triggering summarization turn');
     const fullHistory = formatMessages(missedMessages);
     const summarizationOutput = await runContainerAgent(
@@ -350,7 +350,7 @@ async function processGroupMessages(queueKey: string): Promise<boolean> {
   }
 
   // 3. Final Prompt Construction
-  const slidingWindow = missedMessages.slice(-10);
+  const slidingWindow = missedMessages.slice(-25);
   let contextPrompt = '';
   if (session.summary) {
     contextPrompt += `<conversation_summary>\n${session.summary}\n</conversation_summary>\n\n`;
@@ -604,7 +604,7 @@ export async function routeNewMessages(newMessages: NewMessage[]): Promise<void>
       if (needsTrigger) {
         const groupTriggerPattern = makeGroupTriggerPattern(group.trigger);
         const hasTrigger = groupMessages.some((m) =>
-          groupTriggerPattern.test(m.content.trim()),
+          groupTriggerPattern.test((m.content || '').trim()),
         );
         if (!hasTrigger) continue;
       }

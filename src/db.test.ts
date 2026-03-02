@@ -26,6 +26,8 @@ function store(overrides: {
   content: string;
   timestamp: string;
   is_from_me?: boolean;
+  media_path?: string;
+  media_metadata?: string;
 }) {
   storeMessage({
     id: overrides.id,
@@ -35,6 +37,8 @@ function store(overrides: {
     content: overrides.content,
     timestamp: overrides.timestamp,
     is_from_me: overrides.is_from_me ?? false,
+    media_path: overrides.media_path,
+    media_metadata: overrides.media_metadata,
   });
 }
 
@@ -83,6 +87,30 @@ describe('storeMessage', () => {
       'Andy',
     );
     expect(messages).toHaveLength(0);
+  });
+
+  it('includes media-only messages and returns media fields', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+
+    store({
+      id: 'msg-photo',
+      chat_jid: 'group@g.us',
+      sender: '111@s.whatsapp.net',
+      sender_name: 'Dave',
+      content: '',
+      timestamp: '2024-01-01T00:00:06.000Z',
+      media_path: '/tmp/photo.jpg',
+      media_metadata: 'A photo of a storefront',
+    });
+
+    const messages = getMessagesSince(
+      'group@g.us',
+      '2024-01-01T00:00:00.000Z',
+      'Andy',
+    );
+    expect(messages).toHaveLength(1);
+    expect(messages[0].media_path).toBe('/tmp/photo.jpg');
+    expect(messages[0].media_metadata).toBe('A photo of a storefront');
   });
 
   it('stores is_from_me flag', () => {
@@ -293,6 +321,28 @@ describe('getNewMessages', () => {
     const { messages, newTimestamp } = getNewMessages([], '', 'Andy');
     expect(messages).toHaveLength(0);
     expect(newTimestamp).toBe('');
+  });
+
+  it('includes media-only messages in multi-jid polling', () => {
+    store({
+      id: 'a5',
+      chat_jid: 'group1@g.us',
+      sender: 'user@s.whatsapp.net',
+      sender_name: 'User',
+      content: '',
+      timestamp: '2024-01-01T00:00:05.000Z',
+      media_path: '/tmp/g1-photo.jpg',
+    });
+
+    const { messages } = getNewMessages(
+      ['group1@g.us', 'group2@g.us'],
+      '2024-01-01T00:00:04.000Z',
+      'Andy',
+    );
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].id).toBe('a5');
+    expect(messages[0].media_path).toBe('/tmp/g1-photo.jpg');
   });
 });
 

@@ -30,6 +30,8 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   secrets?: Record<string, string>;
+  mediaPath?: string;       // host-side path; container sees file at /workspace/media/<basename>
+  mediaMetadata?: string;   // pre-computed description (if already analysed)
 }
 
 interface ContainerOutput {
@@ -589,6 +591,19 @@ ${containerInput.prompt}`
   if (containerInput.isScheduledTask) {
     prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
   }
+
+  // Inject media file path so the agent knows what to read/analyse.
+  // The host mounts data/media/<group>/ → /workspace/media/ (read-only) in the container.
+  if (containerInput.mediaPath) {
+    const mediaBasename = path.basename(containerInput.mediaPath);
+    const containerMediaPath = `/workspace/media/${mediaBasename}`;
+    if (fs.existsSync(containerMediaPath)) {
+      prompt += `\n\n<uploaded_file path="${containerMediaPath}" />`;
+      log(`Injected media path into prompt: ${containerMediaPath}`);
+    } else {
+      log(`Media file not found at expected container path: ${containerMediaPath}`);
+    }
+  }
   const pending = drainIpcInput();
   if (pending.length > 0) {
     log(`Draining ${pending.length} pending IPC messages into initial prompt`);
@@ -749,7 +764,35 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
     },
   });
 
+  // Build initial user message — for Gemini, inject media inline if available.
   let userMessage: string | object = initialPrompt;
+  if (containerInput.mediaPath) {
+    const mediaBasename = path.basename(containerInput.mediaPath);
+    const containerMediaPath = `/workspace/media/${mediaBasename}`;
+    if (fs.existsSync(containerMediaPath)) {
+      try {
+        const mimeGuess = (() => {
+          const ext = path.extname(mediaBasename).toLowerCase();
+          const map: Record<string, string> = {
+            '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+            '.gif': 'image/gif', '.webp': 'image/webp', '.pdf': 'application/pdf',
+          };
+          return map[ext] || 'application/octet-stream';
+        })();
+        const fileData = fs.readFileSync(containerMediaPath);
+        const b64 = fileData.toString('base64');
+        userMessage = [
+          { text: initialPrompt },
+          { inlineData: { mimeType: mimeGuess, data: b64 } },
+        ];
+        log(`Injected inline media into Gemini message: ${containerMediaPath} (${mimeGuess})`);
+      } catch (err) {
+        log(`Failed to read media for Gemini inline: ${err instanceof Error ? err.message : String(err)}`);
+        userMessage = initialPrompt + `\n\n<uploaded_file path="${containerMediaPath}" />`;
+      }
+    }
+  }
+
   const MAX_TURNS = 20;
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
