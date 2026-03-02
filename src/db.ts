@@ -77,9 +77,9 @@ function createSchema(database: Database.Database): void {
       summary TEXT
     );
     CREATE TABLE IF NOT EXISTS registered_groups (
-      jid TEXT PRIMARY KEY,
+      folder TEXT PRIMARY KEY,
+      jid TEXT NOT NULL,
       name TEXT NOT NULL,
-      folder TEXT NOT NULL UNIQUE,
       trigger_pattern TEXT NOT NULL,
       added_at TEXT NOT NULL,
       container_config TEXT,
@@ -135,6 +135,37 @@ function createSchema(database: Database.Database): void {
     database.exec(`ALTER TABLE sessions ADD COLUMN summary TEXT`);
   } catch {
     /* column already exists */
+  }
+
+  // Migration: change registered_groups primary key from jid to folder.
+  // This allows multiple bots (e.g. @Andy and @Pixel) on the same chat JID.
+  try {
+    const pkInfo = database.prepare(
+      `SELECT pk FROM pragma_table_info('registered_groups') WHERE name = 'jid'`,
+    ).get() as { pk: number } | undefined;
+    if (pkInfo && pkInfo.pk === 1) {
+      database.exec(`
+        CREATE TABLE registered_groups_new (
+          folder TEXT PRIMARY KEY,
+          jid TEXT NOT NULL,
+          name TEXT NOT NULL,
+          trigger_pattern TEXT NOT NULL,
+          added_at TEXT NOT NULL,
+          container_config TEXT,
+          requires_trigger INTEGER DEFAULT 1
+        )
+      `);
+      database.exec(`
+        INSERT OR IGNORE INTO registered_groups_new
+          (folder, jid, name, trigger_pattern, added_at, container_config, requires_trigger)
+        SELECT folder, jid, name, trigger_pattern, added_at, container_config, requires_trigger
+        FROM registered_groups
+      `);
+      database.exec(`DROP TABLE registered_groups`);
+      database.exec(`ALTER TABLE registered_groups_new RENAME TO registered_groups`);
+    }
+  } catch {
+    /* migration already done or table doesn't exist yet */
   }
 }
 
@@ -586,13 +617,14 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   if (!isValidGroupFolder(group.folder)) {
     throw new Error(`Invalid group folder "${group.folder}" for JID ${jid}`);
   }
+  // Conflicts on folder (PRIMARY KEY) — allows re-registering same folder to a new JID
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger)
+    `INSERT OR REPLACE INTO registered_groups (folder, jid, name, trigger_pattern, added_at, container_config, requires_trigger)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(
+    group.folder,
     jid,
     group.name,
-    group.folder,
     group.trigger,
     group.added_at,
     group.containerConfig ? JSON.stringify(group.containerConfig) : null,
@@ -619,9 +651,11 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
       );
       continue;
     }
-    result[row.jid] = {
+    // Keyed by folder (unique). Each group carries its own jid field.
+    result[row.folder] = {
       name: row.name,
       folder: row.folder,
+      jid: row.jid,
       trigger: row.trigger_pattern,
       added_at: row.added_at,
       containerConfig: row.container_config

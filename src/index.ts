@@ -76,6 +76,15 @@ function loadState(): void {
   const agentTs = getRouterState('last_agent_timestamp');
   try {
     lastAgentTimestamp = agentTs ? JSON.parse(agentTs) : {};
+    // Migrate: old format was keyed by JID (e.g. '774133756'), new format is
+    // keyed by folder (e.g. 'main'). Detect and reset to avoid stale cursors.
+    const hasJidKeys = Object.keys(lastAgentTimestamp).some(
+      (k) => k.includes('@') || k.includes(':') || /^-?\d+$/.test(k),
+    );
+    if (hasJidKeys) {
+      logger.info('Migrating lastAgentTimestamp from JID-keyed to folder-keyed format');
+      lastAgentTimestamp = {};
+    }
   } catch {
     logger.warn('Corrupted last_agent_timestamp in DB, resetting');
     lastAgentTimestamp = {};
@@ -105,7 +114,7 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
     return;
   }
 
-  registeredGroups[jid] = group;
+  registeredGroups[group.folder] = { ...group, jid };
   setRegisteredGroup(jid, group);
 
   // Create group folder
@@ -123,7 +132,8 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
  */
 export function getAvailableGroups(): import('./container-runner.js').AvailableGroup[] {
   const chats = getAllChats();
-  const registeredJids = new Set(Object.keys(registeredGroups));
+  // registeredGroups is now keyed by folder; collect all registered JIDs from values
+  const registeredJids = new Set(Object.values(registeredGroups).map((g) => g.jid));
 
   return chats
     .filter((c) => c.jid !== '__group_sync__' && c.is_group)
@@ -142,13 +152,21 @@ export function _setRegisteredGroups(
   registeredGroups = groups;
 }
 
+/** Build a per-group trigger regex from its stored trigger string (e.g. "@Pixel") */
+function makeGroupTriggerPattern(trigger: string): RegExp {
+  const escaped = trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^${escaped}\\b`, 'i');
+}
+
 /**
  * Process all pending messages for a group.
- * Called by the GroupQueue when it's this group's turn.
+ * queueKey is the group folder (unique per bot, even when multiple bots share a JID).
  */
-async function processGroupMessages(chatJid: string): Promise<boolean> {
-  const group = registeredGroups[chatJid];
+async function processGroupMessages(queueKey: string): Promise<boolean> {
+  const group = registeredGroups[queueKey];
   if (!group) return true;
+
+  const chatJid = group.jid; // real Telegram/WhatsApp chat ID
 
   const channel = findChannel(channels, chatJid);
   if (!channel) {
@@ -158,7 +176,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
 
-  const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
+  const sinceTimestamp = lastAgentTimestamp[queueKey] || '';
   const missedMessages = getMessagesSince(
     chatJid,
     sinceTimestamp,
@@ -167,10 +185,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
-  // For non-main groups, check if trigger is required and present
+  // For non-main groups, check if this group's trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
+    const groupTriggerPattern = makeGroupTriggerPattern(group.trigger);
     const hasTrigger = missedMessages.some((m) =>
-      TRIGGER_PATTERN.test(m.content.trim()),
+      groupTriggerPattern.test(m.content.trim()),
     );
     if (!hasTrigger) return true;
   }
@@ -192,7 +211,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           mediaPath: msg.media_path,
           assistantName: ASSISTANT_NAME,
         },
-        (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder)
+        (proc, containerName) => queue.registerProcess(queueKey, proc, containerName, group.folder)
       );
 
       if (analysisOutput.status === 'success' && analysisOutput.result) {
@@ -225,7 +244,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         isMain,
         assistantName: ASSISTANT_NAME,
       },
-      (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder)
+      (proc, containerName) => queue.registerProcess(queueKey, proc, containerName, group.folder)
     );
 
     if (summarizationOutput.status === 'success' && summarizationOutput.result) {
@@ -246,8 +265,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
-  const previousCursor = lastAgentTimestamp[chatJid] || '';
-  lastAgentTimestamp[chatJid] =
+  const previousCursor = lastAgentTimestamp[queueKey] || '';
+  lastAgentTimestamp[queueKey] =
     missedMessages[missedMessages.length - 1].timestamp;
   saveState();
 
@@ -266,7 +285,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         { group: group.name },
         'Idle timeout, closing container stdin',
       );
-      queue.closeStdin(chatJid);
+      queue.closeStdin(queueKey);
     }, IDLE_TIMEOUT);
   };
 
@@ -293,7 +312,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
 
     if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
+      queue.notifyIdle(queueKey);
     }
 
     if (result.status === 'error') {
@@ -315,7 +334,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       return true;
     }
     // Roll back cursor so retries can re-process these messages
-    lastAgentTimestamp[chatJid] = previousCursor;
+    lastAgentTimestamp[queueKey] = previousCursor;
     saveState();
     logger.warn(
       { group: group.name },
@@ -360,7 +379,7 @@ async function runAgent(
     group.folder,
     isMain,
     availableGroups,
-    new Set(Object.keys(registeredGroups)),
+    new Set(Object.values(registeredGroups).map((g) => g.jid)),
   );
 
   // Wrap onOutput to track session ID from streamed results
@@ -387,7 +406,7 @@ async function runAgent(
         assistantName: ASSISTANT_NAME,
       },
       (proc, containerName) =>
-        queue.registerProcess(chatJid, proc, containerName, group.folder),
+        queue.registerProcess(group.folder, proc, containerName, group.folder),
       wrappedOnOutput,
     );
 
@@ -423,7 +442,7 @@ async function startMessageLoop(): Promise<void> {
 
   while (true) {
     try {
-      const jids = Object.keys(registeredGroups);
+      const jids = [...new Set(Object.values(registeredGroups).map((g) => g.jid))];
       const { messages, newTimestamp } = getNewMessages(
         jids,
         lastTimestamp,
@@ -455,10 +474,11 @@ export async function routeNewMessages(newMessages: NewMessage[]): Promise<void>
   }
 
   for (const [chatJid, groupMessages] of Object.entries(byChat)) {
-    const group = registeredGroups[chatJid];
-    if (!group) {
-      continue;
-    }
+    // Find all groups registered to this JID (may be more than one, e.g. @Andy + @Pixel)
+    const groupsForJid = Object.values(registeredGroups).filter(
+      (g) => g.jid === chatJid,
+    );
+    if (groupsForJid.length === 0) continue;
 
     const channel = findChannel(channels, chatJid);
     if (!channel) {
@@ -466,60 +486,62 @@ export async function routeNewMessages(newMessages: NewMessage[]): Promise<void>
       continue;
     }
 
-    const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
-    const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
+    for (const group of groupsForJid) {
+      const queueKey = group.folder; // unique per bot
+      const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
+      const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
 
-    if (needsTrigger) {
-      const hasTrigger = groupMessages.some((m) =>
-        TRIGGER_PATTERN.test(m.content.trim()),
-      );
-      if (!hasTrigger) {
-        continue;
-      }
-    }
-
-    // If a batch timer is already running for this group, clear it (reset the quiet period)
-    const existingTimer = batchTimers.get(chatJid);
-    if (existingTimer) {
-      global.clearTimeout(existingTimer);
-      batchTimers.delete(chatJid);
-    }
-
-    const timer = globalThis.setTimeout(async () => {
-      batchTimers.delete(chatJid);
-
-      // Pull all messages since lastAgentTimestamp so non-trigger
-      // context that accumulated between triggers is included.
-      const allPending = getMessagesSince(
-        chatJid,
-        lastAgentTimestamp[chatJid] || '',
-        ASSISTANT_NAME,
-      );
-      const messagesToSend =
-        allPending.length > 0 ? allPending : groupMessages;
-      const formatted = formatMessages(messagesToSend);
-
-      if (queue.sendMessage(chatJid, formatted)) {
-        logger.debug(
-          { chatJid, count: messagesToSend.length },
-          'Piped messages to active container',
+      if (needsTrigger) {
+        const groupTriggerPattern = makeGroupTriggerPattern(group.trigger);
+        const hasTrigger = groupMessages.some((m) =>
+          groupTriggerPattern.test(m.content.trim()),
         );
-        lastAgentTimestamp[chatJid] =
-          messagesToSend[messagesToSend.length - 1].timestamp;
-        saveState();
-        // Show typing indicator while the container processes the piped message
-        channel
-          .setTyping?.(chatJid, true)
-          ?.catch((err) =>
-            logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
-          );
-      } else {
-        // No active container — enqueue for a new one
-        queue.enqueueMessageCheck(chatJid);
+        if (!hasTrigger) continue;
       }
-    }, BATCH_DELAY);
 
-    batchTimers.set(chatJid, timer);
+      // Reset batch timer for this specific group
+      const existingTimer = batchTimers.get(queueKey);
+      if (existingTimer) {
+        global.clearTimeout(existingTimer);
+        batchTimers.delete(queueKey);
+      }
+
+      const timer = globalThis.setTimeout(async () => {
+        batchTimers.delete(queueKey);
+
+        // Pull all messages since lastAgentTimestamp for this group so non-trigger
+        // context that accumulated between triggers is included.
+        const allPending = getMessagesSince(
+          chatJid,
+          lastAgentTimestamp[queueKey] || '',
+          ASSISTANT_NAME,
+        );
+        const messagesToSend =
+          allPending.length > 0 ? allPending : groupMessages;
+        const formatted = formatMessages(messagesToSend);
+
+        if (queue.sendMessage(queueKey, formatted)) {
+          logger.debug(
+            { chatJid, queueKey, count: messagesToSend.length },
+            'Piped messages to active container',
+          );
+          lastAgentTimestamp[queueKey] =
+            messagesToSend[messagesToSend.length - 1].timestamp;
+          saveState();
+          // Show typing indicator while the container processes the piped message
+          channel
+            .setTyping?.(chatJid, true)
+            ?.catch((err) =>
+              logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
+            );
+        } else {
+          // No active container — enqueue for a new one
+          queue.enqueueMessageCheck(queueKey);
+        }
+      }, BATCH_DELAY);
+
+      batchTimers.set(queueKey, timer);
+    }
   }
 }
 
@@ -528,15 +550,16 @@ export async function routeNewMessages(newMessages: NewMessage[]): Promise<void>
  * Handles crash between advancing lastTimestamp and processing messages.
  */
 function recoverPendingMessages(): void {
-  for (const [chatJid, group] of Object.entries(registeredGroups)) {
-    const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
-    const pending = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
+  // registeredGroups is folder-keyed; each group carries its own .jid
+  for (const [folder, group] of Object.entries(registeredGroups)) {
+    const sinceTimestamp = lastAgentTimestamp[folder] || '';
+    const pending = getMessagesSince(group.jid, sinceTimestamp, ASSISTANT_NAME);
     if (pending.length > 0) {
       logger.info(
         { group: group.name, pendingCount: pending.length },
         'Recovery: found unprocessed messages',
       );
-      queue.enqueueMessageCheck(chatJid);
+      queue.enqueueMessageCheck(folder);
     }
   }
 }
@@ -571,17 +594,18 @@ async function main(): Promise<void> {
     onMessage: (_chatJid: string, msg: NewMessage) => {
       // Auto-register new Telegram chats (unknown numeric IDs) as client1
       // Also handles client-bot namespaced JIDs like 'c:<chatId>'
-      if (!registeredGroups[_chatJid] && /^(c:)?-?\d+$/.test(_chatJid)) {
+      if (!Object.values(registeredGroups).some((g) => g.jid === _chatJid) && /^(c:)?-?\d+$/.test(_chatJid)) {
         logger.info({ chatJid: _chatJid }, 'Auto-registering new Telegram chat as client');
         const newGroup: RegisteredGroup = {
           name: `Client ${_chatJid}`,
           folder: 'client1',
+          jid: _chatJid,
           trigger: '@Support',
           added_at: new Date().toISOString(),
           requiresTrigger: false,
         };
         setRegisteredGroup(_chatJid, newGroup);
-        registeredGroups[_chatJid] = newGroup;
+        registeredGroups['client1'] = newGroup;
       }
       storeMessage(msg);
     },

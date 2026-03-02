@@ -89,6 +89,7 @@ import { runContainerAgent, ContainerOutput } from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
+  jid: 'test-jid@g.us',
   name: 'Test Group',
   folder: 'test-group',
   trigger: '@Andy',

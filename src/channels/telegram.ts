@@ -93,7 +93,7 @@ export class TelegramChannel implements Channel {
 
                 if (isAdminBot) {
                     // Admin bot: only respond to chats registered in the admin folder
-                    const group = this.opts.registeredGroups()[routingJid];
+                    const group = Object.values(this.opts.registeredGroups()).find((g) => g.jid === routingJid);
                     if (!group || group.folder !== this.adminFolder) return;
                 }
                 // Client bot: processes all JIDs (namespaced, so no collision with admin)

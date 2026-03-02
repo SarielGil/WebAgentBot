@@ -47,7 +47,7 @@ describe('Message Batching', () => {
     beforeEach(() => {
         vi.useFakeTimers();
         batchTimers.clear();
-        _setRegisteredGroups({ [chatJid]: group });
+        _setRegisteredGroups({ [group.folder]: { ...group, jid: chatJid } });
 
         // Mock channel
         const mockChannel = {
@@ -78,7 +78,7 @@ describe('Message Batching', () => {
         // Send first message
         await routeNewMessages([msg1]);
         await vi.advanceTimersByTimeAsync(0);
-        expect(batchTimers.has(chatJid)).toBe(true);
+        expect(batchTimers.has(group.folder)).toBe(true);
         expect(queue.sendMessage).not.toHaveBeenCalled();
 
         // Advance 3s
@@ -95,7 +95,7 @@ describe('Message Batching', () => {
         // One more second - total 5s since msg2
         await vi.advanceTimersByTimeAsync(1100);
 
-        expect(queue.sendMessage).toHaveBeenCalledWith(chatJid, '@Andy hello\nhow are you?');
-        expect(batchTimers.has(chatJid)).toBe(false);
+        expect(queue.sendMessage).toHaveBeenCalledWith(group.folder, '@Andy hello\nhow are you?');
+        expect(batchTimers.has(group.folder)).toBe(false);
     });
 });

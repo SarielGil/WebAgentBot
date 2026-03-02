@@ -89,7 +89,8 @@ describe('getAvailableGroups', () => {
     );
 
     _setRegisteredGroups({
-      'reg@g.us': {
+      'registered': {
+        jid: 'reg@g.us',
         name: 'Registered',
         folder: 'registered',
         trigger: '@Andy',

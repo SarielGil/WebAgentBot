@@ -35,6 +35,7 @@ export interface ContainerConfig {
 export interface RegisteredGroup {
   name: string;
   folder: string;
+  jid: string; // The chat JID this group listens to (multiple groups can share a JID)
   trigger: string;
   added_at: string;
   containerConfig?: ContainerConfig;

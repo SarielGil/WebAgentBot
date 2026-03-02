@@ -54,7 +54,7 @@ describe('Telegram Media Handling', () => {
     const onMessage = vi.fn();
     const onChatMetadata = vi.fn();
     const registeredGroups = vi.fn(() => ({
-        '12345': { name: 'Test Group', folder: 'test', trigger: '@Andy', added_at: '' }
+        '12345': { jid: '12345', name: 'Test Group', folder: 'test', trigger: '@Andy', added_at: '' }
     }));
 
     beforeEach(() => {

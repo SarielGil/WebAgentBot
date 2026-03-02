@@ -63,6 +63,7 @@ describe('End-to-End Routing Logic', () => {
         storeChatMetadata(chatJid, new Date().toISOString(), 'Test Group', 'telegram', true);
 
         const group = {
+            jid: chatJid,
             name: 'Test Group',
             folder: groupFolder,
             trigger: `@${ASSISTANT_NAME}`,
@@ -74,7 +75,7 @@ describe('End-to-End Routing Logic', () => {
         setRegisteredGroup(chatJid, group);
 
         // CRITICAL: Sync index.ts's in-memory registeredGroups
-        _setRegisteredGroups({ [chatJid]: group });
+        _setRegisteredGroups({ [groupFolder]: { ...group, jid: chatJid } });
 
         // Mock the Telegram channel
         const mockTelegram = {
@@ -117,7 +118,7 @@ describe('End-to-End Routing Logic', () => {
 
         // Verify database cursor
         const lastAgentTs = JSON.parse(getRouterState('last_agent_timestamp') || '{}');
-        expect(lastAgentTs[chatJid]).toBe(timestamp);
+        expect(lastAgentTs[groupFolder]).toBe(timestamp);
 
         expect(queue.sendMessage).toHaveBeenCalled();
     });
@@ -145,6 +146,6 @@ describe('End-to-End Routing Logic', () => {
 
         await p;
 
-        expect(queue.enqueueMessageCheck).toHaveBeenCalledWith(chatJid);
+        expect(queue.enqueueMessageCheck).toHaveBeenCalledWith(groupFolder);
     });
 });

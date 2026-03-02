@@ -13,6 +13,7 @@ import { RegisteredGroup } from './types.js';
 
 // Set up registered groups used across tests
 const MAIN_GROUP: RegisteredGroup = {
+  jid: 'main@g.us',
   name: 'Main',
   folder: 'main',
   trigger: 'always',
@@ -20,6 +21,7 @@ const MAIN_GROUP: RegisteredGroup = {
 };
 
 const OTHER_GROUP: RegisteredGroup = {
+  jid: 'other@g.us',
   name: 'Other',
   folder: 'other-group',
   trigger: '@Andy',
@@ -27,6 +29,7 @@ const OTHER_GROUP: RegisteredGroup = {
 };
 
 const THIRD_GROUP: RegisteredGroup = {
+  jid: 'third@g.us',
   name: 'Third',
   folder: 'third-group',
   trigger: '@Andy',
@@ -40,9 +43,9 @@ beforeEach(() => {
   _initTestDatabase();
 
   groups = {
-    'main@g.us': MAIN_GROUP,
-    'other@g.us': OTHER_GROUP,
-    'third@g.us': THIRD_GROUP,
+    'main': MAIN_GROUP,
+    'other-group': OTHER_GROUP,
+    'third-group': THIRD_GROUP,
   };
 
   // Populate DB as well
@@ -54,8 +57,8 @@ beforeEach(() => {
     sendMessage: async () => {},
     registeredGroups: () => groups,
     registerGroup: (jid, group) => {
-      groups[jid] = group;
-      setRegisteredGroup(jid, group);
+      groups[group.folder] = { ...group, jid };
+      setRegisteredGroup(jid, { ...group, jid });
       // Mock the fs.mkdirSync that registerGroup does
     },
     syncGroupMetadata: async () => {},

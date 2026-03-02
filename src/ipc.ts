@@ -78,7 +78,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               if (data.type === 'message' && data.chatJid && data.text) {
                 // Authorization: verify this group can send to this chatJid
-                const targetGroup = registeredGroups[data.chatJid];
+                const targetGroup = Object.values(registeredGroups).find((g) => g.jid === data.chatJid);
                 if (
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
@@ -95,7 +95,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   );
                 }
               } else if (data.type === 'photo' && data.chatJid && data.mediaFile) {
-                const targetGroup = registeredGroups[data.chatJid];
+                const targetGroup = Object.values(registeredGroups).find((g) => g.jid === data.chatJid);
                 if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
                   if (deps.sendPhoto) {
                     const hostMediaPath = path.join(ipcBaseDir, sourceGroup, 'media', path.basename(data.mediaFile));
@@ -216,7 +216,7 @@ export async function processTaskIpc(
       ) {
         // Resolve the target group from JID
         const targetJid = data.targetJid as string;
-        const targetGroupEntry = registeredGroups[targetJid];
+        const targetGroupEntry = Object.values(registeredGroups).find((g) => g.jid === targetJid);
 
         if (!targetGroupEntry) {
           logger.warn(
@@ -367,7 +367,7 @@ export async function processTaskIpc(
           sourceGroup,
           true,
           availableGroups,
-          new Set(Object.keys(registeredGroups)),
+          new Set(Object.values(registeredGroups).map((g) => g.jid)),
         );
       } else {
         logger.warn(
@@ -395,6 +395,7 @@ export async function processTaskIpc(
           break;
         }
         deps.registerGroup(data.jid, {
+          jid: data.jid,
           name: data.name,
           folder: data.folder,
           trigger: data.trigger,
@@ -471,7 +472,7 @@ export async function processTaskIpc(
 
     case 'slack_escalate':
       if (data.reason) {
-        const group = registeredGroups[data.chatJid!];
+        const group = Object.values(registeredGroups).find((g) => g.jid === data.chatJid!);
         const success = await slackChannel.sendEscalation(data.chatJid!, group?.name || 'Unknown User', data.reason);
         if (success) {
           await deps.sendMessage(data.chatJid!, `🚨 Admin has been notified. They will get back to you soon.`);
@@ -486,12 +487,12 @@ export async function processTaskIpc(
       // chatJid can be provided explicitly, or we auto-resolve from sourceGroup.
       const clientJid =
         data.chatJid ||
-        Object.entries(registeredGroups).find(([, g]) => g.folder === sourceGroup)?.[0];
+        Object.values(registeredGroups).find((g) => g.folder === sourceGroup)?.jid;
 
-      const adminEntry = Object.entries(registeredGroups).find(
-        ([, g]) => g.folder === MAIN_GROUP_FOLDER,
+      const adminGroup = Object.values(registeredGroups).find(
+        (g) => g.folder === MAIN_GROUP_FOLDER,
       );
-      if (!adminEntry) {
+      if (!adminGroup) {
         logger.warn({ sourceGroup }, 'telegram_escalate: no admin group registered');
         if (clientJid) {
           await deps.sendMessage(
@@ -501,8 +502,8 @@ export async function processTaskIpc(
         }
         break;
       }
-      const adminJid = adminEntry[0];
-      const clientGroup = clientJid ? registeredGroups[clientJid] : undefined;
+      const adminJid = adminGroup.jid;
+      const clientGroup = clientJid ? Object.values(registeredGroups).find((g) => g.jid === clientJid) : undefined;
       const clientLabel = clientGroup?.name || clientJid || `group: ${sourceGroup}`;
       const escalationMsg =
         `🚨 <b>Client Escalation</b>\n\n` +
