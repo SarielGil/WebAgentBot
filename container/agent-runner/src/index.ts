@@ -195,11 +195,39 @@ const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'GEMINI
 // Tool credentials that ARE safe to expose to Bash subprocesses (gh, curl, etc.)
 const TOOL_CREDENTIAL_VARS = ['GITHUB_TOKEN', 'BRAVE_API_KEY'];
 
+// Bash patterns that grant access to repos outside the client's own scope.
+// These are blocked to prevent the agent from browsing or accessing other projects.
+const BLOCKED_GH_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
+  { pattern: /gh\s+repo\s+list/,          reason: 'Listing all repos is outside client scope' },
+  { pattern: /gh\s+repo\s+fork/,           reason: 'Forking external repos is not allowed' },
+  { pattern: /gh\s+browse/,               reason: 'Browsing GitHub UI is not allowed in agent scope' },
+  { pattern: /gh\s+search\s+repos/,       reason: 'Searching all GitHub repos is outside client scope' },
+  { pattern: /gh\s+api\s+\/users\//,      reason: 'Accessing other users data is outside client scope' },
+  { pattern: /gh\s+api\s+\/orgs\//,       reason: 'Accessing org data outside client scope' },
+];
+
 function createSanitizeBashHook(): HookCallback {
   return async (input, _toolUseId, _context) => {
     const preInput = input as PreToolUseHookInput;
     const command = (preInput.tool_input as { command?: string })?.command;
     if (!command) return {};
+
+    // Block commands that access GitHub outside the client's own scope
+    for (const { pattern, reason } of BLOCKED_GH_PATTERNS) {
+      if (pattern.test(command)) {
+        log(`[scope-guard] Blocked command matching ${pattern}: ${reason}`);
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            updatedInput: {
+              ...(preInput.tool_input as Record<string, unknown>),
+              // Replace with a harmless echo that explains the block
+              command: `echo '[SCOPE GUARD] Command blocked: ${reason}. You may only access repos created for this client in this project.' && exit 1`,
+            },
+          },
+        };
+      }
+    }
 
     const unsetPrefix = `unset ${SECRET_ENV_VARS.join(' ')} 2>/dev/null; `;
     return {

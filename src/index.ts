@@ -4,8 +4,10 @@ import path from 'path';
 import {
   ASSISTANT_NAME,
   BATCH_DELAY,
+  DATA_DIR,
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
+  MEDIA_DIR,
   POLL_INTERVAL,
   TRIGGER_PATTERN,
 } from './config.js';
@@ -29,6 +31,7 @@ import {
   getNewMessages,
   getRouterState,
   initDatabase,
+  deleteSession,
   setRegisteredGroup,
   setRouterState,
   setSession,
@@ -185,6 +188,82 @@ async function processGroupMessages(queueKey: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
+  // ── /clear command ──────────────────────────────────────────────────────────
+  // Check if ANY of the pending messages is a /clear command.
+  const clearMsg = missedMessages.find(
+    (m) => m.content.trim().toLowerCase() === '/clear',
+  );
+  if (clearMsg) {
+    logger.info({ group: group.name }, '/clear command received — wiping session & media');
+
+    // Stop any active container for this group so we can safely delete its files
+    queue.closeStdin(queueKey);
+
+    // 1. Delete DB session record
+    deleteSession(group.folder);
+    // 2. Clear in-memory session
+    delete sessions[group.folder];
+    // 3. Reset message cursor
+    lastAgentTimestamp[queueKey] = missedMessages[missedMessages.length - 1].timestamp;
+    saveState();
+
+    // 4. Delete Claude transcript JSONL files for this group so the next
+    //    run starts without any prior session context.
+    const claudeProjectsDir = path.join(
+      DATA_DIR, 'sessions', group.folder, '.claude', 'projects',
+    );
+    let transcriptsDeleted = 0;
+    if (fs.existsSync(claudeProjectsDir)) {
+      for (const sub of fs.readdirSync(claudeProjectsDir)) {
+        const subPath = path.join(claudeProjectsDir, sub);
+        if (fs.statSync(subPath).isDirectory()) {
+          for (const file of fs.readdirSync(subPath)) {
+            if (file.endsWith('.jsonl')) {
+              fs.unlinkSync(path.join(subPath, file));
+              transcriptsDeleted++;
+            }
+          }
+        } else if (sub.endsWith('.jsonl')) {
+          fs.unlinkSync(subPath);
+          transcriptsDeleted++;
+        }
+      }
+    }
+
+    // 5. Delete this group's media directory (post-move files) and any flat orphans
+    //    that were downloaded but not yet moved (e.g. arrived while /clear was being handled).
+    let mediaDeleted = 0;
+    const groupMediaDirForClear = path.join(MEDIA_DIR, group.folder);
+    if (fs.existsSync(groupMediaDirForClear)) {
+      try {
+        const files = fs.readdirSync(groupMediaDirForClear);
+        mediaDeleted += files.length;
+        fs.rmSync(groupMediaDirForClear, { recursive: true, force: true });
+      } catch { /* ignore */ }
+    }
+    // Also remove orphaned flat files (downloaded but not yet moved to group subdir)
+    if (fs.existsSync(MEDIA_DIR)) {
+      for (const entry of fs.readdirSync(MEDIA_DIR)) {
+        const entryPath = path.join(MEDIA_DIR, entry);
+        if (fs.statSync(entryPath).isFile()) {
+          try { fs.unlinkSync(entryPath); mediaDeleted++; } catch { /* ignore */ }
+        }
+      }
+    }
+
+    logger.info(
+      { group: group.name, transcriptsDeleted, mediaDeleted },
+      '/clear complete',
+    );
+
+    await channel.sendMessage(
+      chatJid,
+      `✅ נוקה! זיכרון השיחה ו-${mediaDeleted} קבצי מדיה נמחקו. מתחיל מחדש 🧹`,
+    );
+    return true;
+  }
+  // ────────────────────────────────────────────────────────────────────────────
+
   // For non-main groups, check if this group's trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
     const groupTriggerPattern = makeGroupTriggerPattern(group.trigger);
@@ -195,6 +274,21 @@ async function processGroupMessages(queueKey: string): Promise<boolean> {
   }
 
   const isMain = group.folder === MAIN_GROUP_FOLDER;
+
+  // 0. Move any freshly-downloaded media files into this group's isolated subdirectory.
+  //    The Telegram bot downloads to the flat data/media/ dir; we relocate them here
+  //    so the container only sees this group's files, not every other group's uploads.
+  const groupMediaDir = path.join(MEDIA_DIR, group.folder);
+  for (const msg of missedMessages) {
+    if (msg.media_path && fs.existsSync(msg.media_path)) {
+      const dest = path.join(groupMediaDir, path.basename(msg.media_path));
+      if (msg.media_path !== dest) {
+        fs.mkdirSync(groupMediaDir, { recursive: true });
+        fs.renameSync(msg.media_path, dest);
+        msg.media_path = dest;
+      }
+    }
+  }
 
   // 1. Handle Media Analysis Turns
   for (const msg of missedMessages) {
@@ -328,6 +422,16 @@ async function processGroupMessages(queueKey: string): Promise<boolean> {
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
+
+  // Delete this group's media files — they're no longer needed after the agent has processed them.
+  if (fs.existsSync(groupMediaDir)) {
+    try {
+      fs.rmSync(groupMediaDir, { recursive: true, force: true });
+      logger.debug({ group: group.name }, 'Cleaned up group media files after agent run');
+    } catch (err) {
+      logger.warn({ group: group.name, err }, 'Failed to clean up group media files');
+    }
+  }
 
   if (output === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —

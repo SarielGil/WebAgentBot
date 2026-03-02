@@ -23,8 +23,40 @@ When the user asks to build a website, do ALL of the following in one uninterrup
 4. `github_push(repoName: "<slug>", files: [...])` — push all files
 5. `github_pages(repoName: "<slug>", branch: "main")` — enable Pages
 6. `mcp__nanoclaw__send_message` with the live URL: `✅ האתר עלה! https://sarielgil.github.io/<slug>/`
+   → After this, end your turn with ONLY `<internal>done</internal>`. Do NOT repeat the URL in your final output.
 
 NEVER pause between build and deploy waiting for a user reply.
+
+## Website Preview
+
+To send the user a screenshot preview of a site:
+
+*Local preview (before or after deploying):*
+```bash
+# 1. Serve the site locally inside the container
+cd /tmp/<slug>
+python3 -m http.server 8080 &
+SERVER_PID=$!
+sleep 1
+
+# 2. Screenshot it
+agent-browser open http://localhost:8080
+agent-browser wait --load networkidle
+agent-browser screenshot /tmp/preview.png --full
+
+# 3. Send the photo
+kill $SERVER_PID 2>/dev/null
+```
+Then: `mcp__nanoclaw__send_photo` with `/tmp/preview.png`
+
+*GitHub Pages preview (after deploy — needs ~90 sec to go live):*
+```bash
+agent-browser wait 90000
+agent-browser open https://sarielgil.github.io/<slug>/
+agent-browser wait --load networkidle
+agent-browser screenshot /tmp/preview.png --full
+```
+Then: `mcp__nanoclaw__send_photo` with `/tmp/preview.png`
 
 ## GitHub Pages Deployment Rule
 
@@ -40,6 +72,8 @@ Also mention it may take 1-2 minutes to fully activate. NEVER skip this step.
 - Wrap internal thinking in `<internal>` tags — those are logged but not sent.
 - Always check `conversations/` for past context before asking the user to repeat themselves.
 - Save important info to files in `/workspace/group/` so it persists across sessions.
+- **No double replies**: When `send_message` is your complete final answer, finish with ONLY `<internal>done</internal>` — never repeat the same message in your final output text.
+- Always reply in the same language the user wrote in. Never send both Hebrew and English versions.
 
 ## Message Formatting
 

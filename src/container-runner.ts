@@ -119,8 +119,10 @@ function buildVolumeMounts(
     }
   }
 
-  // Mount Media Directory (read-only)
-  const mediaDir = path.resolve(DATA_DIR, 'media');
+  // Mount per-group media directory (read-only).
+  // Each group only sees files uploaded to its own chat — no cross-group leakage.
+  // Files are deleted after the agent run completes (see processGroupMessages).
+  const mediaDir = path.resolve(DATA_DIR, 'media', group.folder);
   if (fs.existsSync(mediaDir)) {
     mounts.push({
       hostPath: toHostPath(mediaDir),

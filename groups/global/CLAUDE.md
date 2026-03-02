@@ -26,6 +26,32 @@ When a user has uploaded photos and wants them on their site:
 **NEVER** reference `/workspace/media/` paths in HTML — those are container-local and will be broken on the web.
 **ALWAYS** copy photos into the repo folder and use relative `images/<filename>` paths.
 
+## Website Preview
+
+To send a screenshot preview of a website to the user:
+
+*Local preview (build folder, before or after deploying):*
+```bash
+cd /tmp/<slug>
+python3 -m http.server 8080 &
+SERVER_PID=$!
+sleep 1
+agent-browser open http://localhost:8080
+agent-browser wait --load networkidle
+agent-browser screenshot /tmp/preview.png --full
+kill $SERVER_PID 2>/dev/null
+```
+Then call `mcp__nanoclaw__send_photo` with `/tmp/preview.png`.
+
+*GitHub Pages preview (needs ~90 sec after deploy):*
+```bash
+agent-browser wait 90000
+agent-browser open https://sarielgil.github.io/<slug>/
+agent-browser wait --load networkidle
+agent-browser screenshot /tmp/preview.png --full
+```
+Then call `mcp__nanoclaw__send_photo` with `/tmp/preview.png`.
+
 ## GitHub & Deployment
 
 GitHub CLI (`gh`) and `git` are available. `$GITHUB_TOKEN` / `$GH_TOKEN` are pre-set.
@@ -72,6 +98,11 @@ Here's what I found...
 ```
 
 When working as a sub-agent, only use `send_message` if instructed by the main agent.
+
+**No double replies — choose ONE delivery method per turn:**
+- For quick acknowledgements mid-task: use `send_message`, then return your full answer as final output.
+- When `send_message` IS your complete final response (e.g. deployment URL, task done): end your turn with ONLY `<internal>done</internal>` — do NOT also include that same text in your final output.
+- The user's language is the language they write in. Reply only in that language — never send the same content in two languages.
 
 ## Message Formatting
 

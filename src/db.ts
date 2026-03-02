@@ -559,6 +559,10 @@ export function setSession(groupFolder: string, sessionId: string, summary?: str
   `).run(groupFolder, sessionId, summary || null);
 }
 
+export function deleteSession(groupFolder: string): void {
+  db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(groupFolder);
+}
+
 export function getAllSessions(): Record<string, { sessionId: string; summary?: string }> {
   const rows = db
     .prepare('SELECT group_folder, session_id, summary FROM sessions')

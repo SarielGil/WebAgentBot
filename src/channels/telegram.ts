@@ -226,8 +226,17 @@ export class TelegramChannel implements Channel {
             if (!file.file_path) return undefined;
 
             const ext = path.extname(file.file_path) || (prefix === 'photo' ? '.jpg' : '');
-            const fileName = `${prefix}_${Date.now()}${ext}`;
+            // Use a stable name derived from fileId so re-processing the same message
+            // never downloads the same file twice.
+            const safeId = fileId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(-40);
+            const fileName = `${prefix}_${safeId}${ext}`;
             const targetPath = path.join(MEDIA_DIR, fileName);
+
+            // Skip download entirely if this exact file already exists on disk.
+            if (fs.existsSync(targetPath)) {
+                logger.debug({ fileId, targetPath }, 'Media file already cached, skipping download');
+                return targetPath;
+            }
 
             const url = `https://api.telegram.org/file/bot${bot.token}/${file.file_path}`;
 
