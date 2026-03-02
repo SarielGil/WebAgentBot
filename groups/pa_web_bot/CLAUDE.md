@@ -28,7 +28,7 @@ Generate **3 standalone HTML mockups** that each capture a different visual feel
 - Be a single self-contained `index.html` with inline `<style>` (no external files needed)
 - Show the hero section + nav header + footer (enough to convey the full visual feeling)
 - Use real content (business name, tagline, any photos found in `/workspace/media/`)
-- If photos exist, embed them as base64 OR reference `/workspace/media/<file>` just for the preview
+- If photos exist, embed them as base64 in `<img src="data:image/...">` for the preview
 - Represent clearly different aesthetics — e.g. Option 1 minimal/clean, Option 2 bold/dark, Option 3 warm/editorial
 
 Write each mockup to:
@@ -36,25 +36,38 @@ Write each mockup to:
 - `/tmp/<slug>-option2/index.html`
 - `/tmp/<slug>-option3/index.html`
 
-Then take screenshots of all three and send them to the user:
+Then screenshot each and send them using `mcp__nanoclaw__send_photo`. **Screenshots must be saved to `/tmp/` (writable), NOT `/workspace/media/` (read-only):**
+
 ```bash
-# Screenshot each option
+# Screenshot Option 1
 agent-browser open file:///tmp/<slug>-option1/index.html
-agent-browser screenshot -o /workspace/media/option1.png
+agent-browser screenshot -o /tmp/<slug>-option1-preview.png
+# Screenshot Option 2
 agent-browser open file:///tmp/<slug>-option2/index.html
-agent-browser screenshot -o /workspace/media/option2.png
+agent-browser screenshot -o /tmp/<slug>-option2-preview.png
+# Screenshot Option 3
 agent-browser open file:///tmp/<slug>-option3/index.html
-agent-browser screenshot -o /workspace/media/option3.png
+agent-browser screenshot -o /tmp/<slug>-option3-preview.png
 ```
 
-Send all 3 screenshots to the user via `mcp__nanoclaw__send_message` with photo paths, then ask clearly:
-*"Which option captures the right feeling for your site? Reply 1, 2, or 3 — or describe what you'd change."*
+Then send each screenshot as a photo (use the MCP tool — it handles the chatJid automatically):
+```
+mcp__nanoclaw__send_photo file_path=/tmp/<slug>-option1-preview.png caption="Option 1 — Minimal/Clean"
+mcp__nanoclaw__send_photo file_path=/tmp/<slug>-option2-preview.png caption="Option 2 — Bold/Dark"
+mcp__nanoclaw__send_photo file_path=/tmp/<slug>-option3-preview.png caption="Option 3 — Warm/Editorial"
+```
+
+Then send a text message asking them to choose:
+```
+mcp__nanoclaw__send_message: "Here are 3 design options! Which one captures the right feeling for your site? Reply 1, 2, or 3 — or describe what you'd change."
+```
 
 **STOP HERE and wait for the user's reply before proceeding to Step 3.**
+**Do NOT start building the full site until the user has replied with their choice.**
 
 ### STEP 3 — Build Full Site Based on Chosen Design
 
-Once the user picks an option (or describes changes), build the complete multi-page site based on that design direction:
+Once the user picks an option (or describes changes), build the complete multi-page site based on that design direction. **Write all files to `/tmp/<slug>-final/`** (Step 4 pulls from that path).
 
 **Every site MUST have:**
 - A **header** with navigation linking every page (e.g. Home, About, Services, Contact — whatever applies)
@@ -78,22 +91,28 @@ Write all files to `/tmp/<slug>/`. Copy photos from `/workspace/media/` into `/t
 
 ### STEP 4 — Create Repo, Add README, Deploy
 
-Run this exact bash sequence:
+**Always generate a fresh unique slug** by appending a 4-char hex suffix so you never collide with an existing repo:
+
 ```bash
-SLUG="<slug>"
+BASE="<slug-from-business-name>"
+SUFFIX=$(date +%s | tail -c 5 | tr -d '\n')
+SLUG="${BASE}-${SUFFIX}"
 SITE_NAME="<Site Name>"
 SITE_DESC="<one-line description>"
 
 cd /tmp
 git config --global user.email "bot@nanoclaw.ai"
 git config --global user.name "NanoClaw Bot"
-gh repo create "$SLUG" --public --description "$SITE_DESC"
-git clone "https://x-access-token:$GITHUB_TOKEN@github.com/SarielGil/$SLUG.git"
-cp -r "/tmp/$SLUG/." "$SLUG/"
+
+# Create: fail loudly if it already exists (should never happen with unique slug)
+gh repo create "$SLUG" --public --description "$SITE_DESC" || { echo "ERROR: repo create failed"; exit 1; }
+
+git clone "https://x-access-token:$GITHUB_TOKEN@github.com/SarielGil/$SLUG.git" || exit 1
+cp -r "/tmp/$SLUG-final/." "$SLUG/"
 
 # Copy user photos into the repo
+mkdir -p "$SLUG/images"
 if ls /workspace/media/*.{jpg,jpeg,png,gif,webp} 2>/dev/null | head -1; then
-  mkdir -p "$SLUG/images"
   cp /workspace/media/*.{jpg,jpeg,png,gif,webp} "$SLUG/images/" 2>/dev/null || true
 fi
 

@@ -11,6 +11,7 @@ This file is automatically included for all non-main bots. It defines shared too
 - **Files** — read, write, edit files in `/workspace/group/`
 - **Schedule** — schedule tasks to run later or on a recurring basis
 - **Send messages** — use `mcp__nanoclaw__send_message` to send an immediate reply while still working (useful to acknowledge before long tasks)
+- **Send photos** — use `mcp__nanoclaw__send_photo` to send an image file to the user (e.g. screenshots, generated charts). Pass the absolute file path inside the container. **NEVER** write IPC files manually for photos — use this tool instead.
 - **Photos** — user photos arrive at `/workspace/media/<filename>`. List them with `ls /workspace/media/`.
 
 ## Using User Photos in a Website

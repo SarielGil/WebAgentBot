@@ -280,6 +280,47 @@ Use available_groups.json to find the JID for a group. The folder name should be
   },
 );
 
+server.tool(
+  'send_photo',
+  'Send an image file to the user immediately. The file must already exist on disk inside the container (e.g. a screenshot saved by agent-browser). Use this after taking screenshots or generating images.',
+  {
+    file_path: z.string().describe('Absolute path to the image file inside the container (e.g. /tmp/screenshot.png or /workspace/group/chart.png)'),
+    caption: z.string().optional().describe('Optional caption shown below the photo'),
+  },
+  async (args) => {
+    const srcPath = args.file_path;
+    if (!fs.existsSync(srcPath)) {
+      return {
+        content: [{ type: 'text' as const, text: `File not found: ${srcPath}` }],
+        isError: true,
+      };
+    }
+
+    const mediaDir = path.join(IPC_DIR, 'media');
+    fs.mkdirSync(mediaDir, { recursive: true });
+
+    const ext = path.extname(srcPath) || '.png';
+    const mediaFile = `photo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}${ext}`;
+    const destPath = path.join(mediaDir, mediaFile);
+
+    // Only copy if not already in the media dir
+    if (path.resolve(srcPath) !== path.resolve(destPath)) {
+      fs.copyFileSync(srcPath, destPath);
+    }
+
+    writeIpcFile(MESSAGES_DIR, {
+      type: 'photo',
+      chatJid,
+      mediaFile,
+      caption: args.caption || '',
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+
+    return { content: [{ type: 'text' as const, text: `Photo queued: ${mediaFile}` }] };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);
