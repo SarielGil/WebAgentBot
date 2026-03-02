@@ -16,7 +16,14 @@
     "prepare": "husky",
     "setup": "tsx setup/index.ts",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:web": "bash scripts/test-web-agent.sh",
+    "test:web:retrieval": "bash scripts/run-web-test.sh retrieval",
+    "test:web:redesign": "bash scripts/run-web-test.sh redesign",
+    "test:web:preview": "bash scripts/run-web-test.sh preview",
+    "test:web:photo": "bash scripts/run-web-test.sh photo",
+    "test:web:e2e": "bash scripts/run-web-test.sh e2e",
+    "test:web:verbose": "bash scripts/run-web-test.sh e2e --verbose"
   },
   "dependencies": {
     "@octokit/rest": "^22.0.1",
