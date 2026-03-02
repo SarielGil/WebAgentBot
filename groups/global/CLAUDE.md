@@ -11,7 +11,19 @@ This file is automatically included for all non-main bots. It defines shared too
 - **Files** — read, write, edit files in `/workspace/group/`
 - **Schedule** — schedule tasks to run later or on a recurring basis
 - **Send messages** — use `mcp__nanoclaw__send_message` to send an immediate reply while still working (useful to acknowledge before long tasks)
-- **Photos** — user photos arrive at `/workspace/media/<filename>`
+- **Photos** — user photos arrive at `/workspace/media/<filename>`. List them with `ls /workspace/media/`.
+
+## Using User Photos in a Website
+
+When a user has uploaded photos and wants them on their site:
+1. List available photos: `ls /workspace/media/`
+2. Create an `images/` folder in the repo: `mkdir -p /tmp/<slug>/images/`
+3. Copy each photo into it: `cp /workspace/media/<filename> /tmp/<slug>/images/<filename>`
+4. In HTML, reference them with a **relative path**: `<img src="images/<filename>" alt="...">`
+5. After `git push`, the photo will be live at: `https://sarielgil.github.io/<slug>/images/<filename>`
+
+**NEVER** reference `/workspace/media/` paths in HTML — those are container-local and will be broken on the web.
+**ALWAYS** copy photos into the repo folder and use relative `images/<filename>` paths.
 
 ## GitHub & Deployment
 
@@ -36,6 +48,17 @@ sleep 2
 gh api repos/SarielGil/REPO_NAME/pages -X POST -f "source[branch]=main" -f "source[path]=/"
 ```
 Live URL is always: `https://sarielgil.github.io/REPO_NAME` (takes ~1 min). Never make up a URL.
+
+## Website Design Rules
+
+**NEVER use icons in generated websites.** This includes:
+- No icon libraries (Font Awesome, Material Icons, Bootstrap Icons, Heroicons, Feather, etc.)
+- No `<i class="fa-...">` or `<span class="material-icons">` or any icon font tags
+- No inline SVG icons or icon sprite sheets
+- No emoji used as UI icons (e.g. ✓ ➜ ★ as decorative elements)
+- No `<img>` tags pointing to icon files
+
+Icons are a strong signal that a site was AI-generated. Use clean typography, spacing, colour, and layout instead. Replace icon-dependent UI patterns with text labels, CSS shapes, or well-styled buttons.
 
 ## Communication Style
 

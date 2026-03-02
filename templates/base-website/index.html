@@ -5,56 +5,86 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{TITLE}}</title>
     <meta name="description" content="{{DESCRIPTION}}">
-    
-    <!-- SEO / AEO Best Practices -->
+
+    <!-- SEO -->
     <meta name="keywords" content="{{KEYWORDS}}">
-    <meta name="author" content="Webbot Builder">
+    <meta name="author" content="{{BRAND_NAME}}">
     <link rel="canonical" href="{{CANONICAL_URL}}">
-    
-    <!-- Open Graph / Facebook -->
+    <link rel="sitemap" type="application/xml" href="/sitemap.xml">
+
+    <!-- Open Graph -->
     <meta property="og:type" content="website">
     <meta property="og:url" content="{{CANONICAL_URL}}">
     <meta property="og:title" content="{{TITLE}}">
     <meta property="og:description" content="{{DESCRIPTION}}">
     <meta property="og:image" content="{{OG_IMAGE}}">
 
-    <!-- Twitter -->
+    <!-- Twitter Card -->
     <meta property="twitter:card" content="summary_large_image">
     <meta property="twitter:url" content="{{CANONICAL_URL}}">
     <meta property="twitter:title" content="{{TITLE}}">
     <meta property="twitter:description" content="{{DESCRIPTION}}">
     <meta property="twitter:image" content="{{OG_IMAGE}}">
 
+    <!-- JSON-LD: Organization + WebSite schema -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "Organization",
+          "name": "{{BRAND_NAME}}",
+          "url": "{{CANONICAL_URL}}",
+          "description": "{{DESCRIPTION}}"
+        },
+        {
+          "@type": "WebSite",
+          "name": "{{BRAND_NAME}}",
+          "url": "{{CANONICAL_URL}}",
+          "potentialAction": {
+            "@type": "SearchAction",
+            "target": "{{CANONICAL_URL}}?q={search_term_string}",
+            "query-input": "required name=search_term_string"
+          }
+        }
+      ]
+    }
+    </script>
+
     <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
-    
+
     <link rel="stylesheet" href="css/style.css">
-    
-    <!-- reCAPTCHA v3 -->
-    <script src="https://www.google.com/recaptcha/api.js?render={{RECAPTCHA_SITE_KEY}}"></script>
 </head>
 <body>
+
+    <!-- ===== HEADER (copy to every page) ===== -->
     <header>
         <div class="container">
             <nav>
                 <a href="index.html" class="logo">{{BRAND_NAME}}</a>
-                <ul>
-                    <li><a href="#about">About</a></li>
-                    <li><a href="#services">Services</a></li>
-                    <li><a href="#contact">Contact</a></li>
+                <button class="nav-toggle" aria-label="Toggle navigation" aria-expanded="false">
+                    <span></span><span></span><span></span>
+                </button>
+                <ul class="nav-links">
+                    <li><a href="index.html">Home</a></li>
+                    <li><a href="about.html">About</a></li>
+                    <li><a href="services.html">Services</a></li>
+                    <li><a href="contact.html">Contact</a></li>
                 </ul>
             </nav>
         </div>
     </header>
+    <!-- ===== END HEADER ===== -->
 
     <main>
         <section id="hero">
             <div class="container">
                 <h1>{{HERO_TITLE}}</h1>
                 <p>{{HERO_SUBTITLE}}</p>
-                <a href="#contact" class="btn">Get Started</a>
+                <a href="contact.html" class="btn">Get Started</a>
             </div>
         </section>
 
@@ -62,42 +92,68 @@
             <div class="container">
                 <h2>About Us</h2>
                 <p>{{ABOUT_TEXT}}</p>
+                <a href="about.html" class="btn btn-outline">Learn More</a>
             </div>
         </section>
 
-        <section id="contact">
+        <section id="services">
             <div class="container">
-                <h2>Contact Us</h2>
-                <form id="contact-form">
-                    <input type="text" name="name" placeholder="Your Name" required>
-                    <input type="email" name="email" placeholder="Your Email" required>
-                    <textarea name="message" placeholder="Your Message" required></textarea>
-                    <button type="submit" class="btn">Send Message</button>
-                </form>
+                <h2>Our Services</h2>
+                <div class="services-grid">
+                    <div class="service-card">
+                        <h3>{{SERVICE_1_TITLE}}</h3>
+                        <p>{{SERVICE_1_DESC}}</p>
+                    </div>
+                    <div class="service-card">
+                        <h3>{{SERVICE_2_TITLE}}</h3>
+                        <p>{{SERVICE_2_DESC}}</p>
+                    </div>
+                    <div class="service-card">
+                        <h3>{{SERVICE_3_TITLE}}</h3>
+                        <p>{{SERVICE_3_DESC}}</p>
+                    </div>
+                </div>
             </div>
         </section>
     </main>
 
+    <!-- ===== FOOTER (copy to every page) ===== -->
     <footer>
         <div class="container">
-            <p>&copy; <span id="year"></span> {{BRAND_NAME}}. All rights reserved.</p>
+            <div class="footer-inner">
+                <div class="footer-brand">
+                    <a href="index.html" class="logo">{{BRAND_NAME}}</a>
+                    <p>{{DESCRIPTION}}</p>
+                </div>
+                <nav class="footer-nav" aria-label="Footer navigation">
+                    <ul>
+                        <li><a href="index.html">Home</a></li>
+                        <li><a href="about.html">About</a></li>
+                        <li><a href="services.html">Services</a></li>
+                        <li><a href="contact.html">Contact</a></li>
+                    </ul>
+                </nav>
+            </div>
+            <p class="footer-copy">&copy; <span class="year"></span> {{BRAND_NAME}}. All rights reserved.</p>
         </div>
     </footer>
+    <!-- ===== END FOOTER ===== -->
 
     <script src="js/main.js"></script>
     <script>
-        document.getElementById('year').textContent = new Date().getFullYear();
-        
-        // Example reCAPTCHA execution
-        document.getElementById('contact-form').addEventListener('submit', function(e) {
-            e.preventDefault();
-            grecaptcha.ready(function() {
-                grecaptcha.execute('{{RECAPTCHA_SITE_KEY}}', {action: 'submit'}).then(function(token) {
-                    console.log('reCAPTCHA token:', token);
-                    alert('Form submitted! (Simulation)');
-                });
+        // Auto year
+        document.querySelectorAll('.year').forEach(el => el.textContent = new Date().getFullYear());
+
+        // Mobile nav toggle
+        const toggle = document.querySelector('.nav-toggle');
+        const navLinks = document.querySelector('.nav-links');
+        if (toggle) {
+            toggle.addEventListener('click', () => {
+                const open = toggle.getAttribute('aria-expanded') === 'true';
+                toggle.setAttribute('aria-expanded', String(!open));
+                navLinks.classList.toggle('open');
             });
-        });
+        }
     </script>
 </body>
 </html>

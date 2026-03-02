@@ -306,6 +306,12 @@ async function processGroupMessages(queueKey: string): Promise<boolean> {
       if (text) {
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
+      } else if (raw.trim()) {
+        // Agent had output but it was entirely internal — log so this is traceable
+        logger.warn(
+          { group: group.name },
+          'Agent result was non-empty but entirely stripped (all <internal> tags) — no message sent to user',
+        );
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();

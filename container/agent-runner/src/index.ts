@@ -637,6 +637,15 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
     return;
   }
 
+  // Inject tool credentials into process.env so Bash subprocesses (gh, git, curl) can use them
+  for (const key of TOOL_CREDENTIAL_VARS) {
+    const value = (containerInput.secrets as Record<string, string> | undefined)?.[key];
+    if (value) {
+      process.env[key] = value;
+      if (key === 'GITHUB_TOKEN') process.env['GH_TOKEN'] = value;
+    }
+  }
+
   log('Switching to Gemini 2.5 Flash fallback...');
 
   const ai = new GoogleGenAI({ apiKey });
@@ -695,9 +704,10 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
     },
   ];
 
-  // Read system prompt from GEMINI.md or CLAUDE.md if available
+  // Read system prompt from CLAUDE.md (primary for both backends) with GEMINI.md as an optional override.
+  // CLAUDE.md is the single source of truth; create GEMINI.md only for Gemini-specific overrides.
   let systemInstruction = 'You are a helpful AI assistant. You have access to bash, file operations, and can send messages back to the user.';
-  for (const name of ['GEMINI.md', 'CLAUDE.md']) {
+  for (const name of ['CLAUDE.md', 'GEMINI.md']) {
     const p = `/workspace/group/${name}`;
     if (fs.existsSync(p)) { systemInstruction = fs.readFileSync(p, 'utf-8'); break; }
   }
