@@ -43,7 +43,7 @@ beforeEach(() => {
   _initTestDatabase();
 
   groups = {
-    'main': MAIN_GROUP,
+    main: MAIN_GROUP,
     'other-group': OTHER_GROUP,
     'third-group': THIRD_GROUP,
   };
@@ -395,7 +395,9 @@ describe('IPC message authorization', () => {
     targetChatJid: string,
     registeredGroups: Record<string, RegisteredGroup>,
   ): boolean {
-    const targetGroup = Object.values(registeredGroups).find(g => g.jid === targetChatJid);
+    const targetGroup = Object.values(registeredGroups).find(
+      (g) => g.jid === targetChatJid,
+    );
     return isMain || (!!targetGroup && targetGroup.folder === sourceGroup);
   }
 

@@ -107,11 +107,14 @@ describe('formatMessages', () => {
     const result = formatMessages([
       makeMsg({
         media_path: '/tmp/uploads/band-photo.jpg',
-        media_metadata: 'portrait photo; best website section: hero; object-position: top center',
+        media_metadata:
+          'portrait photo; best website section: hero; object-position: top center',
       }),
     ]);
     expect(result).toContain('media_file="band-photo.jpg"');
-    expect(result).toContain('media_description="portrait photo; best website section: hero; object-position: top center"');
+    expect(result).toContain(
+      'media_description="portrait photo; best website section: hero; object-position: top center"',
+    );
   });
 });
 

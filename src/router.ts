@@ -16,7 +16,9 @@ export function formatMessages(messages: NewMessage[]): string {
       extras.push(`media_description="${escapeXml(m.media_metadata)}"`);
     }
     if (m.media_path) {
-      extras.push(`media_file="${escapeXml(m.media_path.split('/').pop() || m.media_path)}"`);
+      extras.push(
+        `media_file="${escapeXml(m.media_path.split('/').pop() || m.media_path)}"`,
+      );
     }
     const extra = extras.length ? ` ${extras.join(' ')}` : '';
     return `<message sender="${escapeXml(m.sender_name)}" time="${m.timestamp}"${extra}>${escapeXml(m.content)}</message>`;

@@ -1,6 +1,6 @@
 import { WorkflowPhase } from './ConversationManager.js';
 
-export type Intent = 
+export type Intent =
   | 'provide_brand_info'
   | 'select_design'
   | 'check_domain'
@@ -13,12 +13,24 @@ export class IntentRouter {
     const normalized = message.trim().toLowerCase();
 
     const directOptions = [
-      '1', '2', '3',
-      'option 1', 'option 2', 'option 3',
-      'option one', 'option two', 'option three',
-      'first', 'second', 'third',
-      'the first', 'the second', 'the third',
-      'one', 'two', 'three',
+      '1',
+      '2',
+      '3',
+      'option 1',
+      'option 2',
+      'option 3',
+      'option one',
+      'option two',
+      'option three',
+      'first',
+      'second',
+      'third',
+      'the first',
+      'the second',
+      'the third',
+      'one',
+      'two',
+      'three',
     ];
 
     if (directOptions.includes(normalized)) {
@@ -33,16 +45,20 @@ export class IntentRouter {
   }
 
   private detectDesignChangeRequest(message: string): boolean {
-    return /\b(change|tweak|adjust|different|instead|combine|mix|edit|revise|refine|darker|lighter|warmer|cooler|color|palette|font|typography|layout|spacing|hero|button)\b/i.test(message);
+    return /\b(change|tweak|adjust|different|instead|combine|mix|edit|revise|refine|darker|lighter|warmer|cooler|color|palette|font|typography|layout|spacing|hero|button)\b/i.test(
+      message,
+    );
   }
 
   private looksLikeQuestion(message: string): boolean {
-    return /\?|\b(which|what|why|how|can you|could you|compare|difference|better)\b/i.test(message);
+    return /\?|\b(which|what|why|how|can you|could you|compare|difference|better)\b/i.test(
+      message,
+    );
   }
 
   async classify(
-    message: string, 
-    currentPhase: WorkflowPhase
+    message: string,
+    currentPhase: WorkflowPhase,
   ): Promise<Intent> {
     // Fast path: if we're in design_selection and user says "1", "2", or "3"
     if (currentPhase === 'design_selection') {
@@ -62,10 +78,18 @@ export class IntentRouter {
     }
 
     if (currentPhase === 'domain_check') {
-      if (/\b(yes|build|go ahead|launch|ship it|proceed|looks good|do it)\b/i.test(message)) {
+      if (
+        /\b(yes|build|go ahead|launch|ship it|proceed|looks good|do it)\b/i.test(
+          message,
+        )
+      ) {
         return 'approve_build';
       }
-      if (/\b(domain|url|\.com|\.co\.il|\.org|\.net|available|availability)\b/i.test(message)) {
+      if (
+        /\b(domain|url|\.com|\.co\.il|\.org|\.net|available|availability)\b/i.test(
+          message,
+        )
+      ) {
         return 'check_domain';
       }
       return 'general_question';
@@ -83,11 +107,11 @@ export class IntentRouter {
 
   route(intent: Intent, phase: WorkflowPhase): string {
     const routingTable: Record<string, string> = {
-      'provide_brand_info': 'discovery-agent',
-      'select_design': 'design-agent',
-      'check_domain': 'domain-agent',
-      'approve_build': 'builder-agent',
-      'request_change': 'design-agent',
+      provide_brand_info: 'discovery-agent',
+      select_design: 'design-agent',
+      check_domain: 'domain-agent',
+      approve_build: 'builder-agent',
+      request_change: 'design-agent',
     };
     return routingTable[intent] ?? 'orchestrator';
   }

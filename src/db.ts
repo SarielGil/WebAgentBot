@@ -16,8 +16,13 @@ let db: Database.Database;
 
 const SESSION_SCOPE_SEPARATOR = '::';
 
-export function getSessionScopeKey(groupFolder: string, chatJid?: string): string {
-  return chatJid ? `${groupFolder}${SESSION_SCOPE_SEPARATOR}${chatJid}` : groupFolder;
+export function getSessionScopeKey(
+  groupFolder: string,
+  chatJid?: string,
+): string {
+  return chatJid
+    ? `${groupFolder}${SESSION_SCOPE_SEPARATOR}${chatJid}`
+    : groupFolder;
 }
 
 function createSchema(database: Database.Database): void {
@@ -146,9 +151,11 @@ function createSchema(database: Database.Database): void {
   // Migration: change registered_groups primary key from jid to folder.
   // This allows multiple bots (e.g. @Andy and @Pixel) on the same chat JID.
   try {
-    const pkInfo = database.prepare(
-      `SELECT pk FROM pragma_table_info('registered_groups') WHERE name = 'jid'`,
-    ).get() as { pk: number } | undefined;
+    const pkInfo = database
+      .prepare(
+        `SELECT pk FROM pragma_table_info('registered_groups') WHERE name = 'jid'`,
+      )
+      .get() as { pk: number } | undefined;
     if (pkInfo && pkInfo.pk === 1) {
       database.exec(`
         CREATE TABLE registered_groups_new (
@@ -168,7 +175,9 @@ function createSchema(database: Database.Database): void {
         FROM registered_groups
       `);
       database.exec(`DROP TABLE registered_groups`);
-      database.exec(`ALTER TABLE registered_groups_new RENAME TO registered_groups`);
+      database.exec(
+        `ALTER TABLE registered_groups_new RENAME TO registered_groups`,
+      );
     }
   } catch {
     /* migration already done or table doesn't exist yet */
@@ -395,7 +404,11 @@ export function getMessagesSince(
     .all(chatJid, sinceTimestamp, `${botPrefix}:%`) as NewMessage[];
 }
 
-export function updateMessageMediaMetadata(chatJid: string, msgId: string, metadata: string): void {
+export function updateMessageMediaMetadata(
+  chatJid: string,
+  msgId: string,
+  metadata: string,
+): void {
   db.prepare(
     `UPDATE messages SET media_metadata = ? WHERE chat_jid = ? AND id = ?`,
   ).run(metadata, chatJid, msgId);
@@ -551,14 +564,19 @@ export function setRouterState(key: string, value: string): void {
 
 // --- Session accessors ---
 
-export function getSession(groupFolder: string, chatJid?: string): { sessionId: string; summary?: string } | undefined {
+export function getSession(
+  groupFolder: string,
+  chatJid?: string,
+): { sessionId: string; summary?: string } | undefined {
   const keys = chatJid
     ? [getSessionScopeKey(groupFolder, chatJid), groupFolder]
     : [groupFolder];
 
   for (const key of keys) {
     const row = db
-      .prepare('SELECT session_id, summary FROM sessions WHERE group_folder = ?')
+      .prepare(
+        'SELECT session_id, summary FROM sessions WHERE group_folder = ?',
+      )
       .get(key) as { session_id: string; summary: string | null } | undefined;
     if (!row) continue;
     return {
@@ -570,14 +588,21 @@ export function getSession(groupFolder: string, chatJid?: string): { sessionId: 
   return undefined;
 }
 
-export function setSession(groupFolder: string, sessionId: string, summary?: string, chatJid?: string): void {
+export function setSession(
+  groupFolder: string,
+  sessionId: string,
+  summary?: string,
+  chatJid?: string,
+): void {
   const scopeKey = getSessionScopeKey(groupFolder, chatJid);
-  db.prepare(`
+  db.prepare(
+    `
     INSERT INTO sessions (group_folder, session_id, summary) VALUES (?, ?, ?)
     ON CONFLICT(group_folder) DO UPDATE SET
       session_id = excluded.session_id,
       summary = CASE WHEN excluded.summary IS NOT NULL THEN excluded.summary ELSE sessions.summary END
-  `).run(scopeKey, sessionId, summary || null);
+  `,
+  ).run(scopeKey, sessionId, summary || null);
 }
 
 export function deleteSession(groupFolder: string, chatJid?: string): void {
@@ -592,10 +617,17 @@ export function deleteSession(groupFolder: string, chatJid?: string): void {
   db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(groupFolder);
 }
 
-export function getAllSessions(): Record<string, { sessionId: string; summary?: string }> {
+export function getAllSessions(): Record<
+  string,
+  { sessionId: string; summary?: string }
+> {
   const rows = db
     .prepare('SELECT group_folder, session_id, summary FROM sessions')
-    .all() as Array<{ group_folder: string; session_id: string; summary: string | null }>;
+    .all() as Array<{
+    group_folder: string;
+    session_id: string;
+    summary: string | null;
+  }>;
   const result: Record<string, { sessionId: string; summary?: string }> = {};
   for (const row of rows) {
     result[row.group_folder] = {
@@ -615,14 +647,14 @@ export function getRegisteredGroup(
     .prepare('SELECT * FROM registered_groups WHERE jid = ?')
     .get(jid) as
     | {
-      jid: string;
-      name: string;
-      folder: string;
-      trigger_pattern: string;
-      added_at: string;
-      container_config: string | null;
-      requires_trigger: number | null;
-    }
+        jid: string;
+        name: string;
+        folder: string;
+        trigger_pattern: string;
+        added_at: string;
+        container_config: string | null;
+        requires_trigger: number | null;
+      }
     | undefined;
   if (!row) return undefined;
   if (!isValidGroupFolder(row.folder)) {

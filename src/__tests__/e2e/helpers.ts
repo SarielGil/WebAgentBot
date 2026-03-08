@@ -26,13 +26,16 @@ const handler = new MessageHandler(
   mockConversations as any,
   mockRouter as any,
   mockAgents as any,
-  workflowGuard
+  workflowGuard,
 );
 
 /**
  * Sends a message through the system and returns the textual response
  */
-export async function sendMessage(chatId: string, text: string): Promise<string> {
+export async function sendMessage(
+  chatId: string,
+  text: string,
+): Promise<string> {
   return await handler.handle(chatId, text);
 }
 
@@ -40,7 +43,10 @@ export async function sendMessage(chatId: string, text: string): Promise<string>
  * Pre-seeds a conversation by completing the discovery phase
  */
 export async function completedDiscovery(chatId: string) {
-  await sendMessage(chatId, 'I want a website for my bakery called Sweet Dreams');
+  await sendMessage(
+    chatId,
+    'I want a website for my bakery called Sweet Dreams',
+  );
   await sendMessage(chatId, 'Based in Jerusalem, targeting families');
   await sendMessage(chatId, 'Warm, inviting, homemade feel');
 }

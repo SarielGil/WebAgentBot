@@ -1,5 +1,9 @@
-
-export type WorkflowPhase = 'discovery' | 'design_selection' | 'domain_check' | 'building' | 'deployed';
+export type WorkflowPhase =
+  | 'discovery'
+  | 'design_selection'
+  | 'domain_check'
+  | 'building'
+  | 'deployed';
 
 export class WorkflowGuard {
   /**
@@ -7,11 +11,11 @@ export class WorkflowGuard {
    */
   canProceed(action: string, phase: WorkflowPhase): boolean {
     const PHASE_GATES: Record<WorkflowPhase, string[]> = {
-      'discovery':        ['provide_brand_info', 'general_question'],
-      'design_selection': ['select_design', 'request_change', 'general_question'],
-      'domain_check':     ['check_domain', 'approve_build', 'general_question'],
-      'building':         ['approve_build', 'general_question'],
-      'deployed':         ['general_question'],
+      discovery: ['provide_brand_info', 'general_question'],
+      design_selection: ['select_design', 'request_change', 'general_question'],
+      domain_check: ['check_domain', 'approve_build', 'general_question'],
+      building: ['approve_build', 'general_question'],
+      deployed: ['general_question'],
     };
     return PHASE_GATES[phase]?.includes(action) ?? false;
   }

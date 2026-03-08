@@ -8,8 +8,8 @@ export class StateStore {
     await this.redis.set(
       `session:${chatId}`,
       JSON.stringify(state),
-      'EX', 
-      60 * 60 * 24 * 7  // 7 days TTL
+      'EX',
+      60 * 60 * 24 * 7, // 7 days TTL
     );
   }
 

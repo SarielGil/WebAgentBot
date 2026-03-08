@@ -13,7 +13,7 @@ export interface ConversationState {
   lastActive: number;
 }
 
-export type WorkflowPhase = 
+export type WorkflowPhase =
   | 'discovery'
   | 'design_selection'
   | 'domain_check'

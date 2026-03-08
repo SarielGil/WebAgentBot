@@ -42,7 +42,9 @@ function toHostPath(containerInternalPath: string): string {
     HOST_PROJECT_ROOT !== containerRoot &&
     containerInternalPath.startsWith(containerRoot)
   ) {
-    return HOST_PROJECT_ROOT + containerInternalPath.slice(containerRoot.length);
+    return (
+      HOST_PROJECT_ROOT + containerInternalPath.slice(containerRoot.length)
+    );
   }
   return containerInternalPath;
 }
@@ -237,7 +239,13 @@ function buildVolumeMounts(
  * Secrets are never written to disk or mounted as files.
  */
 function readSecrets(): Record<string, string> {
-  return readEnvFile(['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'GEMINI_API_KEY', 'GITHUB_TOKEN', 'BRAVE_API_KEY']);
+  return readEnvFile([
+    'ANTHROPIC_API_KEY',
+    'CLAUDE_CODE_OAUTH_TOKEN',
+    'GEMINI_API_KEY',
+    'GITHUB_TOKEN',
+    'BRAVE_API_KEY',
+  ]);
 }
 
 function buildContainerArgs(

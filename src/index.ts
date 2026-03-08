@@ -87,7 +87,9 @@ function loadState(): void {
       (k) => k.includes('@') || k.includes(':') || /^-?\d+$/.test(k),
     );
     if (hasJidKeys) {
-      logger.info('Migrating lastAgentTimestamp from JID-keyed to folder-keyed format');
+      logger.info(
+        'Migrating lastAgentTimestamp from JID-keyed to folder-keyed format',
+      );
       lastAgentTimestamp = {};
     }
   } catch {
@@ -138,7 +140,9 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
 export function getAvailableGroups(): import('./container-runner.js').AvailableGroup[] {
   const chats = getAllChats();
   // registeredGroups is now keyed by folder; collect all registered JIDs from values
-  const registeredJids = new Set(Object.values(registeredGroups).map((g) => g.jid));
+  const registeredJids = new Set(
+    Object.values(registeredGroups).map((g) => g.jid),
+  );
 
   return chats
     .filter((c) => c.jid !== '__group_sync__' && c.is_group)
@@ -165,7 +169,9 @@ function mergeBatchMessages(
   for (const msg of [...existing, ...incoming]) {
     merged.set(msg.id, msg);
   }
-  return [...merged.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  return [...merged.values()].sort((a, b) =>
+    a.timestamp.localeCompare(b.timestamp),
+  );
 }
 
 /** Build a per-group trigger regex from its stored trigger string (e.g. "@Pixel") */
@@ -228,7 +234,10 @@ ${recentHistory}`,
   );
 
   if (summarizationOutput.status !== 'success' || !summarizationOutput.result) {
-    logger.warn({ group: group.name }, 'Memory summary refresh failed; keeping previous summary');
+    logger.warn(
+      { group: group.name },
+      'Memory summary refresh failed; keeping previous summary',
+    );
     return;
   }
 
@@ -274,7 +283,10 @@ async function processGroupMessages(queueKey: string): Promise<boolean> {
     (m) => m.content.trim().toLowerCase() === '/clear',
   );
   if (clearMsg) {
-    logger.info({ group: group.name }, '/clear command received — wiping session & media');
+    logger.info(
+      { group: group.name },
+      '/clear command received — wiping session & media',
+    );
 
     // Stop any active container for this group so we can safely delete its files
     queue.closeStdin(queueKey);
@@ -285,13 +297,18 @@ async function processGroupMessages(queueKey: string): Promise<boolean> {
     delete sessions[sessionKey];
     delete sessions[group.folder];
     // 3. Reset message cursor
-    lastAgentTimestamp[queueKey] = missedMessages[missedMessages.length - 1].timestamp;
+    lastAgentTimestamp[queueKey] =
+      missedMessages[missedMessages.length - 1].timestamp;
     saveState();
 
     // 4. Delete Claude transcript JSONL files for this group so the next
     //    run starts without any prior session context.
     const claudeProjectsDir = path.join(
-      DATA_DIR, 'sessions', group.folder, '.claude', 'projects',
+      DATA_DIR,
+      'sessions',
+      group.folder,
+      '.claude',
+      'projects',
     );
     let transcriptsDeleted = 0;
     if (fs.existsSync(claudeProjectsDir)) {
@@ -320,14 +337,21 @@ async function processGroupMessages(queueKey: string): Promise<boolean> {
         const files = fs.readdirSync(groupMediaDirForClear);
         mediaDeleted += files.length;
         fs.rmSync(groupMediaDirForClear, { recursive: true, force: true });
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
     // Also remove orphaned flat files (downloaded but not yet moved to group subdir)
     if (fs.existsSync(MEDIA_DIR)) {
       for (const entry of fs.readdirSync(MEDIA_DIR)) {
         const entryPath = path.join(MEDIA_DIR, entry);
         if (fs.statSync(entryPath).isFile()) {
-          try { fs.unlinkSync(entryPath); mediaDeleted++; } catch { /* ignore */ }
+          try {
+            fs.unlinkSync(entryPath);
+            mediaDeleted++;
+          } catch {
+            /* ignore */
+          }
         }
       }
     }
@@ -374,7 +398,10 @@ async function processGroupMessages(queueKey: string): Promise<boolean> {
   // 1. Handle Media Analysis Turns
   for (const msg of missedMessages) {
     if (msg.media_path && !msg.media_metadata) {
-      logger.info({ group: group.name, msgId: msg.id }, 'Triggering media analysis turn');
+      logger.info(
+        { group: group.name, msgId: msg.id },
+        'Triggering media analysis turn',
+      );
       // We run a special one-off container turn just for analysis
       const analysisOutput = await runContainerAgent(
         group,
@@ -399,20 +426,25 @@ Be concrete and compact.`,
           mediaPath: msg.media_path,
           assistantName: ASSISTANT_NAME,
         },
-        (proc, containerName) => queue.registerProcess(queueKey, proc, containerName, group.folder)
+        (proc, containerName) =>
+          queue.registerProcess(queueKey, proc, containerName, group.folder),
       );
 
       if (analysisOutput.status === 'success' && analysisOutput.result) {
         const metadata = stripInternalTags(analysisOutput.result);
         updateMessageMediaMetadata(chatJid, msg.id, metadata);
         msg.media_metadata = metadata; // Update in-memory for the current context
-        logger.info({ group: group.name, msgId: msg.id }, 'Media analysis complete');
+        logger.info(
+          { group: group.name, msgId: msg.id },
+          'Media analysis complete',
+        );
       }
     }
   }
 
   // 2. Context Compression (Summarization)
-  const session = sessions[sessionKey] || sessions[group.folder] || { sessionId: '' };
+  const session = sessions[sessionKey] ||
+    sessions[group.folder] || { sessionId: '' };
 
   // Refresh durable memory frequently so user preferences are carried across turns.
   if (shouldRefreshSummary(missedMessages, !!session.summary)) {
@@ -504,9 +536,15 @@ Be concrete and compact.`,
   if (fs.existsSync(groupMediaDir)) {
     try {
       fs.rmSync(groupMediaDir, { recursive: true, force: true });
-      logger.debug({ group: group.name }, 'Cleaned up group media files after agent run');
+      logger.debug(
+        { group: group.name },
+        'Cleaned up group media files after agent run',
+      );
     } catch (err) {
-      logger.warn({ group: group.name, err }, 'Failed to clean up group media files');
+      logger.warn(
+        { group: group.name, err },
+        'Failed to clean up group media files',
+      );
     }
   }
 
@@ -574,16 +612,22 @@ async function runAgent(
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
-      if (output.newSessionId) {
-        if (!sessions[sessionKey]) sessions[sessionKey] = { sessionId: output.newSessionId };
-        sessions[sessionKey].sessionId = output.newSessionId;
-        if (scopedSession?.summary) {
-          sessions[sessionKey].summary = scopedSession.summary;
+        if (output.newSessionId) {
+          if (!sessions[sessionKey])
+            sessions[sessionKey] = { sessionId: output.newSessionId };
+          sessions[sessionKey].sessionId = output.newSessionId;
+          if (scopedSession?.summary) {
+            sessions[sessionKey].summary = scopedSession.summary;
+          }
+          setSession(
+            group.folder,
+            output.newSessionId,
+            scopedSession?.summary,
+            chatJid,
+          );
         }
-        setSession(group.folder, output.newSessionId, scopedSession?.summary, chatJid);
+        await onOutput(output);
       }
-      await onOutput(output);
-    }
     : undefined;
 
   try {
@@ -603,12 +647,18 @@ async function runAgent(
     );
 
     if (output.newSessionId) {
-      if (!sessions[sessionKey]) sessions[sessionKey] = { sessionId: output.newSessionId };
+      if (!sessions[sessionKey])
+        sessions[sessionKey] = { sessionId: output.newSessionId };
       sessions[sessionKey].sessionId = output.newSessionId;
       if (scopedSession?.summary) {
         sessions[sessionKey].summary = scopedSession.summary;
       }
-      setSession(group.folder, output.newSessionId, scopedSession?.summary, chatJid);
+      setSession(
+        group.folder,
+        output.newSessionId,
+        scopedSession?.summary,
+        chatJid,
+      );
     }
 
     if (output.status === 'error') {
@@ -637,7 +687,9 @@ async function startMessageLoop(): Promise<void> {
 
   while (true) {
     try {
-      const jids = [...new Set(Object.values(registeredGroups).map((g) => g.jid))];
+      const jids = [
+        ...new Set(Object.values(registeredGroups).map((g) => g.jid)),
+      ];
       const { messages, newTimestamp } = getNewMessages(
         jids,
         lastTimestamp,
@@ -661,7 +713,9 @@ async function startMessageLoop(): Promise<void> {
 }
 
 /** @internal - exported for testing */
-export async function routeNewMessages(newMessages: NewMessage[]): Promise<void> {
+export async function routeNewMessages(
+  newMessages: NewMessage[],
+): Promise<void> {
   const byChat: Record<string, NewMessage[]> = {};
   for (const msg of newMessages) {
     if (!byChat[msg.chat_jid]) byChat[msg.chat_jid] = [];
@@ -815,8 +869,14 @@ async function main(): Promise<void> {
     onMessage: (_chatJid: string, msg: NewMessage) => {
       // Auto-register new Telegram chats (unknown numeric IDs) as client1
       // Also handles client-bot namespaced JIDs like 'c:<chatId>'
-      if (!Object.values(registeredGroups).some((g) => g.jid === _chatJid) && /^(c:)?-?\d+$/.test(_chatJid)) {
-        logger.info({ chatJid: _chatJid }, 'Auto-registering new Telegram chat as client');
+      if (
+        !Object.values(registeredGroups).some((g) => g.jid === _chatJid) &&
+        /^(c:)?-?\d+$/.test(_chatJid)
+      ) {
+        logger.info(
+          { chatJid: _chatJid },
+          'Auto-registering new Telegram chat as client',
+        );
         const newGroup: RegisteredGroup = {
           name: `Client ${_chatJid}`,
           folder: 'client1',
@@ -876,8 +936,7 @@ async function main(): Promise<void> {
     },
     registeredGroups: () => registeredGroups,
     registerGroup,
-    syncGroupMetadata: (force) =>
-      Promise.resolve(),
+    syncGroupMetadata: (force) => Promise.resolve(),
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
@@ -894,7 +953,7 @@ async function main(): Promise<void> {
 const isDirectRun =
   process.argv[1] &&
   new URL(import.meta.url).pathname ===
-  new URL(`file://${process.argv[1]}`).pathname;
+    new URL(`file://${process.argv[1]}`).pathname;
 
 if (isDirectRun) {
   main().catch((err) => {

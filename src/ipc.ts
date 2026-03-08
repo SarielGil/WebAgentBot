@@ -20,7 +20,11 @@ import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
-  sendPhoto?: (jid: string, filePath: string, caption?: string) => Promise<void>;
+  sendPhoto?: (
+    jid: string,
+    filePath: string,
+    caption?: string,
+  ) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroupMetadata: (force: boolean) => Promise<void>;
@@ -78,7 +82,9 @@ export function startIpcWatcher(deps: IpcDeps): void {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               if (data.type === 'message' && data.chatJid && data.text) {
                 // Authorization: verify this group can send to this chatJid
-                const targetGroup = Object.values(registeredGroups).find((g) => g.jid === data.chatJid);
+                const targetGroup = Object.values(registeredGroups).find(
+                  (g) => g.jid === data.chatJid,
+                );
                 if (
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
@@ -94,20 +100,49 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     'Unauthorized IPC message attempt blocked',
                   );
                 }
-              } else if (data.type === 'photo' && data.chatJid && data.mediaFile) {
-                const targetGroup = Object.values(registeredGroups).find((g) => g.jid === data.chatJid);
-                if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
+              } else if (
+                data.type === 'photo' &&
+                data.chatJid &&
+                data.mediaFile
+              ) {
+                const targetGroup = Object.values(registeredGroups).find(
+                  (g) => g.jid === data.chatJid,
+                );
+                if (
+                  isMain ||
+                  (targetGroup && targetGroup.folder === sourceGroup)
+                ) {
                   if (deps.sendPhoto) {
-                    const hostMediaPath = path.join(ipcBaseDir, sourceGroup, 'media', path.basename(data.mediaFile));
-                    await deps.sendPhoto(data.chatJid, hostMediaPath, data.caption);
-                    logger.info({ chatJid: data.chatJid, sourceGroup }, 'IPC photo sent');
+                    const hostMediaPath = path.join(
+                      ipcBaseDir,
+                      sourceGroup,
+                      'media',
+                      path.basename(data.mediaFile),
+                    );
+                    await deps.sendPhoto(
+                      data.chatJid,
+                      hostMediaPath,
+                      data.caption,
+                    );
+                    logger.info(
+                      { chatJid: data.chatJid, sourceGroup },
+                      'IPC photo sent',
+                    );
                     // Clean up the media file after delivery
-                    try { fs.unlinkSync(hostMediaPath); } catch {}
+                    try {
+                      fs.unlinkSync(hostMediaPath);
+                    } catch {}
                   } else {
-                    logger.warn({ chatJid: data.chatJid }, 'sendPhoto not supported by channel, dropping photo IPC');
+                    logger.warn(
+                      { chatJid: data.chatJid },
+                      'sendPhoto not supported by channel, dropping photo IPC',
+                    );
                   }
                 } else {
-                  logger.warn({ chatJid: data.chatJid, sourceGroup }, 'Unauthorized IPC photo attempt blocked');
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'Unauthorized IPC photo attempt blocked',
+                  );
                 }
               }
               fs.unlinkSync(filePath);
@@ -216,7 +251,9 @@ export async function processTaskIpc(
       ) {
         // Resolve the target group from JID
         const targetJid = data.targetJid as string;
-        const targetGroupEntry = Object.values(registeredGroups).find((g) => g.jid === targetJid);
+        const targetGroupEntry = Object.values(registeredGroups).find(
+          (g) => g.jid === targetJid,
+        );
 
         if (!targetGroupEntry) {
           logger.warn(
@@ -414,11 +451,20 @@ export async function processTaskIpc(
     case 'github_create_repo':
       if (data.repoName) {
         try {
-          const url = await githubService.createRepo(data.repoName, data.repoDescription);
-          await deps.sendMessage(data.chatJid!, `✅ GitHub Repository created: ${url}`);
+          const url = await githubService.createRepo(
+            data.repoName,
+            data.repoDescription,
+          );
+          await deps.sendMessage(
+            data.chatJid!,
+            `✅ GitHub Repository created: ${url}`,
+          );
         } catch (err) {
           logger.error({ err }, 'IPC github_create_repo failed');
-          await deps.sendMessage(data.chatJid!, `❌ Failed to create GitHub repository: ${err instanceof Error ? err.message : String(err)}`);
+          await deps.sendMessage(
+            data.chatJid!,
+            `❌ Failed to create GitHub repository: ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
       }
       break;
@@ -426,7 +472,10 @@ export async function processTaskIpc(
     case 'domain_check':
       if (data.domain) {
         const available = await domainService.isAvailable(data.domain);
-        await deps.sendMessage(data.chatJid!, `🔎 Domain *${data.domain}* availability: ${available ? '✅ Available' : '❌ Taken'}`);
+        await deps.sendMessage(
+          data.chatJid!,
+          `🔎 Domain *${data.domain}* availability: ${available ? '✅ Available' : '❌ Taken'}`,
+        );
       }
       break;
 
@@ -434,11 +483,19 @@ export async function processTaskIpc(
       if (data.query) {
         try {
           const results = await searchService.search(data.query);
-          const summary = results.map((r: any) => `[${r.title}](${r.link}): ${r.snippet}`).join('\n\n');
-          await deps.sendMessage(data.chatJid!, `🔍 Search results for "${data.query}":\n\n${summary}`);
+          const summary = results
+            .map((r: any) => `[${r.title}](${r.link}): ${r.snippet}`)
+            .join('\n\n');
+          await deps.sendMessage(
+            data.chatJid!,
+            `🔍 Search results for "${data.query}":\n\n${summary}`,
+          );
         } catch (err) {
           logger.error({ err }, 'IPC web_search failed');
-          await deps.sendMessage(data.chatJid!, `❌ Failed to search: ${err instanceof Error ? err.message : String(err)}`);
+          await deps.sendMessage(
+            data.chatJid!,
+            `❌ Failed to search: ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
       }
       break;
@@ -446,12 +503,25 @@ export async function processTaskIpc(
     case 'github_push':
       if (data.repoName && (data as any).files) {
         try {
-          const { data: user } = await (githubService as any).octokit.users.getAuthenticated();
-          await githubService.pushFiles(user.login, data.repoName, (data as any).files, (data as any).message);
-          await deps.sendMessage(data.chatJid!, `✅ Files pushed to GitHub repository: ${data.repoName}`);
+          const { data: user } = await (
+            githubService as any
+          ).octokit.users.getAuthenticated();
+          await githubService.pushFiles(
+            user.login,
+            data.repoName,
+            (data as any).files,
+            (data as any).message,
+          );
+          await deps.sendMessage(
+            data.chatJid!,
+            `✅ Files pushed to GitHub repository: ${data.repoName}`,
+          );
         } catch (err) {
           logger.error({ err }, 'IPC github_push failed');
-          await deps.sendMessage(data.chatJid!, `❌ Failed to push files: ${err instanceof Error ? err.message : String(err)}`);
+          await deps.sendMessage(
+            data.chatJid!,
+            `❌ Failed to push files: ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
       }
       break;
@@ -459,25 +529,45 @@ export async function processTaskIpc(
     case 'github_pages':
       if (data.repoName) {
         try {
-          const { data: user } = await (githubService as any).octokit.users.getAuthenticated();
+          const { data: user } = await (
+            githubService as any
+          ).octokit.users.getAuthenticated();
           const branch: string = (data as any).branch || 'main';
           await githubService.enablePages(user.login, data.repoName, branch);
-          await deps.sendMessage(data.chatJid!, `🚀 GitHub Pages enabled for *${data.repoName}* (branch: ${branch}). It will be live at https://${user.login}.github.io/${data.repoName}/ shortly!`);
+          await deps.sendMessage(
+            data.chatJid!,
+            `🚀 GitHub Pages enabled for *${data.repoName}* (branch: ${branch}). It will be live at https://${user.login}.github.io/${data.repoName}/ shortly!`,
+          );
         } catch (err) {
           logger.error({ err }, 'IPC github_pages failed');
-          await deps.sendMessage(data.chatJid!, `❌ Failed to enable GitHub Pages: ${err instanceof Error ? err.message : String(err)}`);
+          await deps.sendMessage(
+            data.chatJid!,
+            `❌ Failed to enable GitHub Pages: ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
       }
       break;
 
     case 'slack_escalate':
       if (data.reason) {
-        const group = Object.values(registeredGroups).find((g) => g.jid === data.chatJid!);
-        const success = await slackChannel.sendEscalation(data.chatJid!, group?.name || 'Unknown User', data.reason);
+        const group = Object.values(registeredGroups).find(
+          (g) => g.jid === data.chatJid!,
+        );
+        const success = await slackChannel.sendEscalation(
+          data.chatJid!,
+          group?.name || 'Unknown User',
+          data.reason,
+        );
         if (success) {
-          await deps.sendMessage(data.chatJid!, `🚨 Admin has been notified. They will get back to you soon.`);
+          await deps.sendMessage(
+            data.chatJid!,
+            `🚨 Admin has been notified. They will get back to you soon.`,
+          );
         } else {
-          await deps.sendMessage(data.chatJid!, `⚠️ Failed to notify admin via Slack. Please try again later.`);
+          await deps.sendMessage(
+            data.chatJid!,
+            `⚠️ Failed to notify admin via Slack. Please try again later.`,
+          );
         }
       }
       break;
@@ -487,13 +577,17 @@ export async function processTaskIpc(
       // chatJid can be provided explicitly, or we auto-resolve from sourceGroup.
       const clientJid =
         data.chatJid ||
-        Object.values(registeredGroups).find((g) => g.folder === sourceGroup)?.jid;
+        Object.values(registeredGroups).find((g) => g.folder === sourceGroup)
+          ?.jid;
 
       const adminGroup = Object.values(registeredGroups).find(
         (g) => g.folder === MAIN_GROUP_FOLDER,
       );
       if (!adminGroup) {
-        logger.warn({ sourceGroup }, 'telegram_escalate: no admin group registered');
+        logger.warn(
+          { sourceGroup },
+          'telegram_escalate: no admin group registered',
+        );
         if (clientJid) {
           await deps.sendMessage(
             clientJid,
@@ -503,8 +597,11 @@ export async function processTaskIpc(
         break;
       }
       const adminJid = adminGroup.jid;
-      const clientGroup = clientJid ? Object.values(registeredGroups).find((g) => g.jid === clientJid) : undefined;
-      const clientLabel = clientGroup?.name || clientJid || `group: ${sourceGroup}`;
+      const clientGroup = clientJid
+        ? Object.values(registeredGroups).find((g) => g.jid === clientJid)
+        : undefined;
+      const clientLabel =
+        clientGroup?.name || clientJid || `group: ${sourceGroup}`;
       const escalationMsg =
         `🚨 <b>Client Escalation</b>\n\n` +
         `<b>From:</b> ${clientLabel}\n` +
@@ -520,7 +617,7 @@ export async function processTaskIpc(
       if (clientJid) {
         await deps.sendMessage(
           clientJid,
-          '✅ Your request has been forwarded to our support team. You\'ll hear back shortly!',
+          "✅ Your request has been forwarded to our support team. You'll hear back shortly!",
         );
       }
       break;

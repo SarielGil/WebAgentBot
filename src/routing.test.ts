@@ -89,7 +89,7 @@ describe('getAvailableGroups', () => {
     );
 
     _setRegisteredGroups({
-      'registered': {
+      registered: {
         jid: 'reg@g.us',
         name: 'Registered',
         folder: 'registered',
