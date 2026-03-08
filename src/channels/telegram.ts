@@ -30,11 +30,17 @@ export interface TelegramChannelOpts {
 export class TelegramChannel implements Channel {
     name = 'telegram';
 
+    private static readonly OUTGOING_RETRY_MS = 5000;
+
     /** All active bot instances. bots[0] = client bot, bots[1] = admin bot. */
     private bots: Bot[] = [];
     private connected = false;
-    private outgoingQueue: Array<{ jid: string; text: string }> = [];
+    private outgoingQueue: Array<
+        | { type: 'message'; jid: string; text: string }
+        | { type: 'photo'; jid: string; filePath: string; caption?: string }
+    > = [];
     private flushing = false;
+    private retryTimer: NodeJS.Timeout | null = null;
     private opts: TelegramChannelOpts;
     private adminFolder: string;
 
@@ -151,7 +157,7 @@ export class TelegramChannel implements Channel {
 
     async sendMessage(jid: string, text: string): Promise<void> {
         if (!this.connected) {
-            this.outgoingQueue.push({ jid, text });
+            this.enqueueOutgoing({ type: 'message', jid, text });
             return;
         }
         const bot = this.botForJid(jid);
@@ -160,7 +166,7 @@ export class TelegramChannel implements Channel {
             await bot.api.sendMessage(chatId, text, { parse_mode: 'HTML' });
             logger.info({ jid, botIndex: this.bots.indexOf(bot) }, 'Message sent via Telegram');
         } catch (err) {
-            this.outgoingQueue.push({ jid, text });
+            this.enqueueOutgoing({ type: 'message', jid, text });
             logger.warn({ err, jid }, 'Failed to send Telegram message, queued');
         }
     }
@@ -176,11 +182,18 @@ export class TelegramChannel implements Channel {
 
     async disconnect(): Promise<void> {
         this.connected = false;
+        if (this.retryTimer) {
+            clearTimeout(this.retryTimer);
+            this.retryTimer = null;
+        }
         await Promise.all(this.bots.map(b => b.stop()));
     }
 
     async sendPhoto(jid: string, filePath: string, caption?: string): Promise<void> {
-        if (!this.connected) return;
+        if (!this.connected) {
+            this.enqueueOutgoing({ type: 'photo', jid, filePath, caption });
+            return;
+        }
         const bot = this.botForJid(jid);
         const chatId = this.rawChatId(jid);
         try {
@@ -190,6 +203,7 @@ export class TelegramChannel implements Channel {
             await bot.api.sendPhoto(chatId, new InputFile(stream), opts as any);
             logger.info({ jid }, 'Photo sent via Telegram');
         } catch (err) {
+            this.enqueueOutgoing({ type: 'photo', jid, filePath, caption });
             logger.warn({ err, jid, filePath }, 'Failed to send Telegram photo');
         }
     }
@@ -213,11 +227,52 @@ export class TelegramChannel implements Channel {
         try {
             while (this.outgoingQueue.length > 0) {
                 const item = this.outgoingQueue.shift()!;
-                await this.botForJid(item.jid).api.sendMessage(this.rawChatId(item.jid), item.text);
+                try {
+                    await this.sendQueuedItem(item);
+                } catch (err) {
+                    this.outgoingQueue.unshift(item);
+                    this.scheduleRetry();
+                    logger.warn({ err, jid: item.jid, queueLength: this.outgoingQueue.length }, 'Failed to flush Telegram queue, will retry');
+                    break;
+                }
             }
         } finally {
             this.flushing = false;
         }
+    }
+
+    private enqueueOutgoing(
+        item: { type: 'message'; jid: string; text: string } | { type: 'photo'; jid: string; filePath: string; caption?: string },
+    ): void {
+        this.outgoingQueue.push(item);
+        this.scheduleRetry();
+    }
+
+    private scheduleRetry(): void {
+        if (this.retryTimer || !this.connected || this.outgoingQueue.length === 0) return;
+        this.retryTimer = setTimeout(() => {
+            this.retryTimer = null;
+            this.flushOutgoingQueue().catch(err => logger.error({ err }, 'Failed to flush queue'));
+        }, TelegramChannel.OUTGOING_RETRY_MS);
+    }
+
+    private async sendQueuedItem(
+        item: { type: 'message'; jid: string; text: string } | { type: 'photo'; jid: string; filePath: string; caption?: string },
+    ): Promise<void> {
+        const bot = this.botForJid(item.jid);
+        const chatId = this.rawChatId(item.jid);
+
+        if (item.type === 'message') {
+            await bot.api.sendMessage(chatId, item.text, { parse_mode: 'HTML' });
+            logger.info({ jid: item.jid, botIndex: this.bots.indexOf(bot) }, 'Message sent via Telegram');
+            return;
+        }
+
+        const stream = fs.createReadStream(item.filePath);
+        const opts: Record<string, unknown> = {};
+        if (item.caption) opts.caption = item.caption;
+        await bot.api.sendPhoto(chatId, new InputFile(stream), opts as any);
+        logger.info({ jid: item.jid }, 'Photo sent via Telegram');
     }
 
     private async downloadTelegramFile(bot: Bot, fileId: string, prefix: string): Promise<string | undefined> {

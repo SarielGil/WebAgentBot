@@ -26,9 +26,22 @@ When a user has uploaded photos and wants them on their site:
 **NEVER** reference `/workspace/media/` paths in HTML — those are container-local and will be broken on the web.
 **ALWAYS** copy photos into the repo folder and use relative `images/<filename>` paths.
 
+If photos exist, extract a color palette from them and use it for the site theme:
+- Define CSS variables (example: `--color-primary`, `--color-accent`, `--color-bg`, `--color-text`) from dominant photo tones.
+- Keep text contrast readable (WCAG-friendly contrast).
+- Keep option variants distinct, but still anchored to the same photo-derived palette family.
+
+For SEO on image-heavy pages:
+- Every `<img>` must have descriptive `alt` text tied to business + context.
+- Add `title` attribute when it adds meaning.
+- Add `ImageObject` JSON-LD entries for key images (name, description, contentUrl).
+- Add a short visible caption or nearby descriptive text for important images.
+
 ## Website Preview
 
 To send a screenshot preview of a website to the user:
+
+When the user wants to render a local HTML page or static site and send a screenshot, use the `render-local-html` skill.
 
 *Local preview (build folder, before or after deploying):*
 ```bash
@@ -122,3 +135,37 @@ When learning something important:
 - Save structured data as files (`customers.md`, `projects/NAME/README.md`, etc.)
 - Split files over 500 lines into sub-folders
 - Keep an index of what you've stored
+
+## Website Project Protocol (All Bots)
+
+For any new website project, follow this order:
+1. Create/update roadmap first at `/workspace/group/projects/<slug>/README.md` (short and lightweight).
+2. Generate 3 clearly different mockup options before full build.
+3. Screenshot all 3 options and send them with `mcp__nanoclaw__send_photo`.
+4. Ask user to choose option 1/2/3.
+5. Only after choice: build full site, deploy, and update roadmap checklist.
+
+Variation requirements for the 3 options:
+- Option 1: minimal/editorial
+- Option 2: bold/high-contrast
+- Option 3: warm/human
+
+Do not send near-identical variants. Change layout structure, typography, and color system between options.
+If user photos exist, every preview set must visibly use real uploaded photos in the actual mockups — not just later in the final build.
+When deriving colors from the same photos, create 3 different interpretations of the palette rather than 3 near-identical shades of the same scheme.
+
+Roadmap priority:
+- Conversation context and latest user instruction are the source of truth.
+- Roadmap is a tracking artifact, not a replacement for user intent.
+- If roadmap conflicts with current user request, follow the current user request and then update roadmap.
+
+## Redesign Mode Rules (Critical)
+
+When user asks for a redesign/refactor/update of an existing website:
+1. Treat it as an in-place redesign, not a new unrelated site.
+2. Preserve existing business identity and content unless user explicitly requests replacement.
+3. Preserve all existing contact information (phone, email, address, contact form fields, WhatsApp/Telegram links).
+4. Keep existing URL/repo unless user explicitly asks for a new project.
+5. Only change visual/design layers first (layout, spacing, typography, color, components), then send preview.
+6. Never drop core sections during redesign (hero, services/products, contact block, footer contacts).
+7. Pre-deploy validation is mandatory: `index.html` must exist in the deploy root. If missing, stop and fix before push/deploy.

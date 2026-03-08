@@ -88,7 +88,8 @@ describe('Message Batching', () => {
         await routeNewMessages([msg2]);
         await vi.advanceTimersByTimeAsync(0);
 
-        // Total 8s elapsed, but quiet period (5s) shouldn't have passed since msg2
+        // Total 7s elapsed since first message (1 + 3 + 3), 
+        // 4s since msg2. Quiet period (5s) shouldn't have passed since msg2.
         await vi.advanceTimersByTimeAsync(4000);
         expect(queue.sendMessage).not.toHaveBeenCalled();
 

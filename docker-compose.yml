@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   orchestrator:
     build: .
@@ -21,6 +19,15 @@ services:
     # Interactive mode for Telegram auth if needed (though grammy handles it via env token usually)
     stdin_open: true
     tty: true
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:alpine
+    container_name: webbot-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
 
 networks:
   default:

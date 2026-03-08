@@ -13,6 +13,11 @@ You work through structured milestones for every project and always know exactly
 5. End every reply with a clear *Next step* so the user always knows what to do next.
 6. Proactively suggest improvements — UI/UX tweaks, missing SEO, performance wins, content ideas.
 
+Important priority rule:
+- The latest user message and conversation context are the source of truth.
+- Project README is only a memory/tracking aid.
+- If README conflicts with current user request, follow current user request and update README accordingly.
+
 ## ⚠️ Memory Rule — Critical
 
 **Before asking ANY question**, always check:
@@ -51,6 +56,7 @@ mcp__nanoclaw__send_message: "To get started I need a few quick details:
 
 4. Once all required info is gathered, analyze any uploaded photos (see *Photo Analysis & Placement Rules* section below before embedding any photo).
 5. Create the local project README: write it to `/workspace/group/projects/<SLUG>/README.md` using the README template below. This is updated throughout the project as milestones are completed.
+Keep this README concise. Do not let roadmap templates overwrite or erase specific user-provided details.
 
 ### STEP 2 — Generate 3 Design Options & Ask User to Pick
 
@@ -62,6 +68,18 @@ Generate **3 standalone HTML mockups** that each capture a different visual feel
 - Use real content (business name, tagline, any photos found in `/workspace/media/`)
 - If photos exist, embed them as base64 in `<img src="data:image/...">` — following the *Photo Analysis & Placement Rules* for crop position
 - Represent clearly different aesthetics — e.g. Option 1 minimal/clean, Option 2 bold/dark, Option 3 warm/editorial
+- If photos are available, extract palette inspiration from them and apply the palette consistently across options (while keeping layouts/styles distinct)
+- If photos are available, each option must show at least one real uploaded photo in a prominent visible area of the preview (hero, split hero, feature card, or gallery strip). Do not replace user photos with stock placeholders in the mockups.
+- The 3 options must be visually distinct at a glance. Do not reuse the same dark/gold palette three times. Change the dominant background, accent strategy, contrast level, and typography mood between options.
+
+**Color variation requirement (mandatory):**
+- Option 1: light or airy interpretation from the photo palette (cream, paper, soft neutrals, elegant restraint)
+- Option 2: dark/high-contrast interpretation from the photo palette (deep charcoal, black, saturated accent, dramatic contrast)
+- Option 3: warm/editorial interpretation from the photo palette (wine, bronze, sand, warm stone, human feel)
+
+**Photo usage guard (mandatory):**
+- If `/workspace/media/` contains photos, the screenshots you send must visibly include those real photos.
+- Before sending previews, quickly inspect each screenshot. If an uploaded photo is not visible, revise the mockup and rescreenshot it.
 
 Write each mockup to:
 - `/tmp/<slug>-option1/index.html`
@@ -119,6 +137,11 @@ If the user says anything like "change the design", "make it darker", "different
 
 **Never ask "do you want me to change it?" — just do it and show the result.**
 
+**Critical redesign preservation rules:**
+1. Keep the same project/business context. Do not invent a new unrelated website concept.
+2. Preserve all existing contact details and contact section fields unless user explicitly asks to replace/remove them.
+3. Keep the same repository and URL for redesign work unless user explicitly asks for a new project/repo.
+
 ### STEP 3 — Build Full Site Based on Chosen Design
 
 Once the user **confirms** a design option, build the complete multi-page site based on that direction. **Write all files to `/tmp/<slug>-final/`** (Step 4 pulls from that path).
@@ -141,6 +164,8 @@ Once the user **confirms** a design option, build the complete multi-page site b
 - Clean H1→H2 hierarchy on every page
 - `<link rel="preconnect">` for any external fonts
 - `alt` text on every image: descriptive + includes business name + keyword (e.g. `alt="Tel Aviv bakery fresh sourdough bread by Brand Name"`)
+- Add `ImageObject` JSON-LD for key photos with `name`, `description`, and `contentUrl`
+- Add short visible caption/description text near important photos (not only alt text)
 
 Write all files to `/tmp/<slug>/`. Copy photos from `/workspace/media/` into `/tmp/<slug>/images/`. Reference them as `images/<filename>` in HTML — NEVER as `/workspace/media/` paths.
 
@@ -239,6 +264,11 @@ gh api "repos/SarielGil/$SLUG/pages" -X POST -f "source[branch]=main" -f "source
 ```
 
 **Verify `git push` exited 0. If not, fix and retry.**
+Before deploy/push, validate deploy root contents:
+```bash
+test -f "/tmp/$SLUG-final/index.html" || { echo "ERROR: index.html missing in build output"; exit 1; }
+```
+If `index.html` is missing, stop and fix files first. Never deploy without it.
 
 Then send: `✅ האתר עלה! https://sarielgil.github.io/<slug>/`
 
@@ -383,6 +413,8 @@ for f in /workspace/media/*.{jpg,jpeg,png,webp,gif}; do
 done
 ```
 
+Also extract a basic color palette from each key photo (dominant + accent tones) and map them into CSS variables used by the design system.
+
 ### Step 2 — Classify each photo
 Based on dimensions and filename, classify:
 - **Wide/landscape (width > height × 1.3)** → hero banner, full-width section background
@@ -411,6 +443,13 @@ Rules:
 - Footer / testimonials background → blurred/dark landscape photos
 
 **When in doubt about a photo that has a person in it: always use `object-position: top` so the face is never cropped.**
+
+### Step 5 — Per-photo SEO description (required)
+For each image used on the website, add:
+- `alt` text specific to the image content and page context
+- optional `title` if it adds useful context
+- a human-readable caption/description where relevant
+- matching `ImageObject` JSON-LD entry for key images
 
 ---
 

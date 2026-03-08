@@ -102,6 +102,17 @@ describe('formatMessages', () => {
     const result = formatMessages([]);
     expect(result).toBe('<messages>\n\n</messages>');
   });
+
+  it('includes uploaded media filename and description when present', () => {
+    const result = formatMessages([
+      makeMsg({
+        media_path: '/tmp/uploads/band-photo.jpg',
+        media_metadata: 'portrait photo; best website section: hero; object-position: top center',
+      }),
+    ]);
+    expect(result).toContain('media_file="band-photo.jpg"');
+    expect(result).toContain('media_description="portrait photo; best website section: hero; object-position: top center"');
+  });
 });
 
 // --- TRIGGER_PATTERN ---

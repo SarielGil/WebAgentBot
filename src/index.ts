@@ -32,6 +32,7 @@ import {
   getRouterState,
   initDatabase,
   deleteSession,
+  getSessionScopeKey,
   setRegisteredGroup,
   setRouterState,
   setSession,
@@ -65,6 +66,7 @@ let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 export const batchTimers = new Map<string, NodeJS.Timeout>();
+const batchPendingMessages = new Map<string, NewMessage[]>();
 
 let telegram: TelegramChannel;
 export let githubService: GitHubService;
@@ -155,10 +157,87 @@ export function _setRegisteredGroups(
   registeredGroups = groups;
 }
 
+function mergeBatchMessages(
+  existing: NewMessage[],
+  incoming: NewMessage[],
+): NewMessage[] {
+  const merged = new Map<string, NewMessage>();
+  for (const msg of [...existing, ...incoming]) {
+    merged.set(msg.id, msg);
+  }
+  return [...merged.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+}
+
 /** Build a per-group trigger regex from its stored trigger string (e.g. "@Pixel") */
 function makeGroupTriggerPattern(trigger: string): RegExp {
   const escaped = trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return new RegExp(`^${escaped}\\b`, 'i');
+}
+
+function shouldRefreshSummary(
+  missedMessages: NewMessage[],
+  hasExistingSummary: boolean,
+): boolean {
+  if (!hasExistingSummary) return true;
+  if (missedMessages.length >= 3) return true;
+  return missedMessages.some((m) => {
+    const contentLen = (m.content || '').trim().length;
+    return contentLen >= 40 || !!m.media_metadata;
+  });
+}
+
+async function refreshConversationSummary(
+  group: RegisteredGroup,
+  chatJid: string,
+  isMain: boolean,
+  queueKey: string,
+  session: { sessionId: string; summary?: string },
+  recentMessages: NewMessage[],
+): Promise<void> {
+  const existingSummary = session.summary?.trim() || '(none)';
+  const recentHistory = formatMessages(recentMessages.slice(-25));
+  const summarizationOutput = await runContainerAgent(
+    group,
+    {
+      prompt: `Update durable memory for this client chat.
+
+Return only a concise summary block that preserves stable decisions and preferences.
+Keep what is still valid, update what changed, and remove contradictions.
+
+Focus on:
+- project names and active repo/slug names
+- visual/design preferences (liked/disliked)
+- content requests (sections to add/remove)
+- media usage expectations
+- constraints and must-follow workflow choices
+
+Existing memory:
+${existingSummary}
+
+Recent messages:
+${recentHistory}`,
+      sessionId: session.sessionId,
+      groupFolder: group.folder,
+      chatJid,
+      isMain,
+      singleTurn: true,
+      assistantName: ASSISTANT_NAME,
+    },
+    (proc, containerName) =>
+      queue.registerProcess(queueKey, proc, containerName, group.folder),
+  );
+
+  if (summarizationOutput.status !== 'success' || !summarizationOutput.result) {
+    logger.warn({ group: group.name }, 'Memory summary refresh failed; keeping previous summary');
+    return;
+  }
+
+  const summary = stripInternalTags(summarizationOutput.result);
+  if (!summary) return;
+
+  session.summary = summary;
+  setSession(group.folder, session.sessionId, summary, chatJid);
+  logger.info({ group: group.name }, 'Memory summary refreshed');
 }
 
 /**
@@ -178,6 +257,7 @@ async function processGroupMessages(queueKey: string): Promise<boolean> {
   }
 
   const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
+  const sessionKey = getSessionScopeKey(group.folder, chatJid);
 
   const sinceTimestamp = lastAgentTimestamp[queueKey] || '';
   const missedMessages = getMessagesSince(
@@ -200,8 +280,9 @@ async function processGroupMessages(queueKey: string): Promise<boolean> {
     queue.closeStdin(queueKey);
 
     // 1. Delete DB session record
-    deleteSession(group.folder);
+    deleteSession(group.folder, chatJid);
     // 2. Clear in-memory session
+    delete sessions[sessionKey];
     delete sessions[group.folder];
     // 3. Reset message cursor
     lastAgentTimestamp[queueKey] = missedMessages[missedMessages.length - 1].timestamp;
@@ -298,10 +379,23 @@ async function processGroupMessages(queueKey: string): Promise<boolean> {
       const analysisOutput = await runContainerAgent(
         group,
         {
-          prompt: 'Analyze this media',
+          prompt: `Analyze this uploaded media for website use.
+
+Return only a concise metadata summary that includes:
+- filename
+- media type (photo/video/document)
+- orientation or aspect ratio
+- primary subject
+- best website section (hero, about, gallery, services, testimonial, background, other)
+- recommended rendering (cover or contain)
+- recommended CSS object-position
+- any important crop caution (for example: keep faces visible, avoid cropping instrument, good for text overlay)
+
+Be concrete and compact.`,
           groupFolder: group.folder,
           chatJid,
           isMain,
+          singleTurn: true,
           mediaPath: msg.media_path,
           assistantName: ASSISTANT_NAME,
         },
@@ -318,35 +412,18 @@ async function processGroupMessages(queueKey: string): Promise<boolean> {
   }
 
   // 2. Context Compression (Summarization)
-  const session = sessions[group.folder] || { sessionId: '' };
+  const session = sessions[sessionKey] || sessions[group.folder] || { sessionId: '' };
 
-  // If missedMessages is long (e.g. > 15), trigger a summarization turn
-  if (missedMessages.length > 12) {
-    logger.info({ group: group.name }, 'Deep history detected, triggering summarization turn');
-    const fullHistory = formatMessages(missedMessages);
-    const summarizationOutput = await runContainerAgent(
+  // Refresh durable memory frequently so user preferences are carried across turns.
+  if (shouldRefreshSummary(missedMessages, !!session.summary)) {
+    await refreshConversationSummary(
       group,
-      {
-        prompt: `Please summarize the key points and brand decisions from this conversation history into a concise block of metadata.
-        Focus on: Website Name, brand colors, domains discussed, and specific design preferences.
-        
-        History: 
-        ${fullHistory}`,
-        sessionId: session.sessionId,
-        groupFolder: group.folder,
-        chatJid,
-        isMain,
-        assistantName: ASSISTANT_NAME,
-      },
-      (proc, containerName) => queue.registerProcess(queueKey, proc, containerName, group.folder)
+      chatJid,
+      isMain,
+      queueKey,
+      session,
+      missedMessages,
     );
-
-    if (summarizationOutput.status === 'success' && summarizationOutput.result) {
-      const summary = stripInternalTags(summarizationOutput.result);
-      session.summary = summary;
-      setSession(group.folder, session.sessionId, summary);
-      logger.info({ group: group.name }, 'Context summarized and saved');
-    }
   }
 
   // 3. Final Prompt Construction
@@ -464,8 +541,10 @@ async function runAgent(
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const session = sessions[group.folder];
-  const sessionId = session?.sessionId;
-  const summary = session?.summary;
+  const sessionKey = getSessionScopeKey(group.folder, chatJid);
+  const scopedSession = sessions[sessionKey] || sessions[group.folder];
+  const sessionId = scopedSession?.sessionId;
+  const summary = scopedSession?.summary;
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -496,9 +575,12 @@ async function runAgent(
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
       if (output.newSessionId) {
-        if (!sessions[group.folder]) sessions[group.folder] = { sessionId: output.newSessionId };
-        sessions[group.folder].sessionId = output.newSessionId;
-        setSession(group.folder, output.newSessionId);
+        if (!sessions[sessionKey]) sessions[sessionKey] = { sessionId: output.newSessionId };
+        sessions[sessionKey].sessionId = output.newSessionId;
+        if (scopedSession?.summary) {
+          sessions[sessionKey].summary = scopedSession.summary;
+        }
+        setSession(group.folder, output.newSessionId, scopedSession?.summary, chatJid);
       }
       await onOutput(output);
     }
@@ -521,9 +603,12 @@ async function runAgent(
     );
 
     if (output.newSessionId) {
-      if (!sessions[group.folder]) sessions[group.folder] = { sessionId: output.newSessionId };
-      sessions[group.folder].sessionId = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
+      if (!sessions[sessionKey]) sessions[sessionKey] = { sessionId: output.newSessionId };
+      sessions[sessionKey].sessionId = output.newSessionId;
+      if (scopedSession?.summary) {
+        sessions[sessionKey].summary = scopedSession.summary;
+      }
+      setSession(group.folder, output.newSessionId, scopedSession?.summary, chatJid);
     }
 
     if (output.status === 'error') {
@@ -600,24 +685,36 @@ export async function routeNewMessages(newMessages: NewMessage[]): Promise<void>
       const queueKey = group.folder; // unique per bot
       const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
       const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
+      const existingTimer = batchTimers.get(queueKey);
+      const pendingMessages = mergeBatchMessages(
+        batchPendingMessages.get(queueKey) || [],
+        groupMessages,
+      );
 
       if (needsTrigger) {
         const groupTriggerPattern = makeGroupTriggerPattern(group.trigger);
-        const hasTrigger = groupMessages.some((m) =>
+        const hasTrigger = pendingMessages.some((m) =>
           groupTriggerPattern.test((m.content || '').trim()),
         );
-        if (!hasTrigger) continue;
+        // Once a batch window is open for this group, keep extending it with
+        // follow-up messages from the same chat even if they no longer repeat
+        // the trigger. Otherwise the timer fires too early and fragments the
+        // user turn across multiple runs.
+        if (!hasTrigger && !existingTimer) continue;
       }
 
       // Reset batch timer for this specific group
-      const existingTimer = batchTimers.get(queueKey);
       if (existingTimer) {
         global.clearTimeout(existingTimer);
         batchTimers.delete(queueKey);
       }
 
+      batchPendingMessages.set(queueKey, pendingMessages);
+
       const timer = globalThis.setTimeout(async () => {
         batchTimers.delete(queueKey);
+        const bufferedMessages = batchPendingMessages.get(queueKey) || [];
+        batchPendingMessages.delete(queueKey);
 
         // Pull all messages since lastAgentTimestamp for this group so non-trigger
         // context that accumulated between triggers is included.
@@ -627,7 +724,7 @@ export async function routeNewMessages(newMessages: NewMessage[]): Promise<void>
           ASSISTANT_NAME,
         );
         const messagesToSend =
-          allPending.length > 0 ? allPending : groupMessages;
+          allPending.length > 0 ? allPending : bufferedMessages;
         const formatted = formatMessages(messagesToSend);
 
         if (queue.sendMessage(queueKey, formatted)) {
@@ -660,17 +757,31 @@ export async function routeNewMessages(newMessages: NewMessage[]): Promise<void>
  * Handles crash between advancing lastTimestamp and processing messages.
  */
 function recoverPendingMessages(): void {
+  let stateChanged = false;
   // registeredGroups is folder-keyed; each group carries its own .jid
   for (const [folder, group] of Object.entries(registeredGroups)) {
     const sinceTimestamp = lastAgentTimestamp[folder] || '';
     const pending = getMessagesSince(group.jid, sinceTimestamp, ASSISTANT_NAME);
     if (pending.length > 0) {
+      if (!sinceTimestamp) {
+        lastAgentTimestamp[folder] = pending[pending.length - 1].timestamp;
+        stateChanged = true;
+        logger.info(
+          { group: group.name, skippedCount: pending.length },
+          'Recovery: initialized cursor to latest stored message to avoid replaying historical backlog',
+        );
+        continue;
+      }
       logger.info(
         { group: group.name, pendingCount: pending.length },
         'Recovery: found unprocessed messages',
       );
       queue.enqueueMessageCheck(folder);
     }
+  }
+
+  if (stateChanged) {
+    saveState();
   }
 }
 

@@ -14,6 +14,12 @@ import {
 
 let db: Database.Database;
 
+const SESSION_SCOPE_SEPARATOR = '::';
+
+export function getSessionScopeKey(groupFolder: string, chatJid?: string): string {
+  return chatJid ? `${groupFolder}${SESSION_SCOPE_SEPARATOR}${chatJid}` : groupFolder;
+}
+
 function createSchema(database: Database.Database): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS chats (
@@ -545,27 +551,44 @@ export function setRouterState(key: string, value: string): void {
 
 // --- Session accessors ---
 
-export function getSession(groupFolder: string): { sessionId: string; summary?: string } | undefined {
-  const row = db
-    .prepare('SELECT session_id, summary FROM sessions WHERE group_folder = ?')
-    .get(groupFolder) as { session_id: string; summary: string | null } | undefined;
-  if (!row) return undefined;
-  return {
-    sessionId: row.session_id,
-    summary: row.summary || undefined,
-  };
+export function getSession(groupFolder: string, chatJid?: string): { sessionId: string; summary?: string } | undefined {
+  const keys = chatJid
+    ? [getSessionScopeKey(groupFolder, chatJid), groupFolder]
+    : [groupFolder];
+
+  for (const key of keys) {
+    const row = db
+      .prepare('SELECT session_id, summary FROM sessions WHERE group_folder = ?')
+      .get(key) as { session_id: string; summary: string | null } | undefined;
+    if (!row) continue;
+    return {
+      sessionId: row.session_id,
+      summary: row.summary || undefined,
+    };
+  }
+
+  return undefined;
 }
 
-export function setSession(groupFolder: string, sessionId: string, summary?: string): void {
+export function setSession(groupFolder: string, sessionId: string, summary?: string, chatJid?: string): void {
+  const scopeKey = getSessionScopeKey(groupFolder, chatJid);
   db.prepare(`
     INSERT INTO sessions (group_folder, session_id, summary) VALUES (?, ?, ?)
     ON CONFLICT(group_folder) DO UPDATE SET
       session_id = excluded.session_id,
       summary = CASE WHEN excluded.summary IS NOT NULL THEN excluded.summary ELSE sessions.summary END
-  `).run(groupFolder, sessionId, summary || null);
+  `).run(scopeKey, sessionId, summary || null);
 }
 
-export function deleteSession(groupFolder: string): void {
+export function deleteSession(groupFolder: string, chatJid?: string): void {
+  if (chatJid) {
+    db.prepare('DELETE FROM sessions WHERE group_folder IN (?, ?)').run(
+      getSessionScopeKey(groupFolder, chatJid),
+      groupFolder,
+    );
+    return;
+  }
+
   db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(groupFolder);
 }
 

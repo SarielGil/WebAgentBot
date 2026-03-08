@@ -54,6 +54,7 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  singleTurn?: boolean;
   assistantName?: string;
   secrets?: Record<string, string>;
   mediaPath?: string;

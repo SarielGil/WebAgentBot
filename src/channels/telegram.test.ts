@@ -1,14 +1,19 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { TelegramChannel } from './telegram.js';
 import { Bot } from 'grammy';
+import { PassThrough } from 'stream';
 
 vi.mock('grammy', () => {
+    class MockInputFile {
+        constructor(public value: unknown) {}
+    }
     class MockBot {
         constructor() {}
         on = vi.fn();
         api = {
             getFile: vi.fn(),
             sendMessage: vi.fn(),
+            sendPhoto: vi.fn(),
         };
         start = vi.fn();
         stop = vi.fn();
@@ -16,6 +21,7 @@ vi.mock('grammy', () => {
     }
     return {
         Bot: MockBot,
+        InputFile: MockInputFile,
     };
 });
 
@@ -38,6 +44,7 @@ vi.mock('fs', async () => {
         ...actual,
         default: {
             ...actual,
+            createReadStream: vi.fn(() => new PassThrough()),
             createWriteStream: vi.fn(() => ({
                 on: vi.fn((event, cb) => {
                     if (event === 'finish') setTimeout(cb, 0);
@@ -58,12 +65,17 @@ describe('Telegram Media Handling', () => {
     }));
 
     beforeEach(() => {
+        vi.useFakeTimers();
         vi.clearAllMocks();
         channel = new TelegramChannel({
             onMessage,
             onChatMetadata,
             registeredGroups,
         });
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
     });
 
     it('identifies owner JIDs correctly', () => {
@@ -77,5 +89,37 @@ describe('Telegram Media Handling', () => {
         // which is private/internal to connect().
         // For now, we verified the logic in the file.
         expect(channel.name).toBe('telegram');
+    });
+
+    it('retries queued messages after a transient send failure', async () => {
+        const bot = (channel as any).bots[0];
+        (channel as any).connected = true;
+
+        bot.api.sendMessage
+            .mockRejectedValueOnce(new Error('temporary network failure'))
+            .mockResolvedValueOnce(undefined);
+
+        await channel.sendMessage('12345', 'hello');
+        expect(bot.api.sendMessage).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(5000);
+
+        expect(bot.api.sendMessage).toHaveBeenCalledTimes(2);
+    });
+
+    it('retries queued photos after a transient send failure', async () => {
+        const bot = (channel as any).bots[0];
+        (channel as any).connected = true;
+
+        bot.api.sendPhoto
+            .mockRejectedValueOnce(new Error('temporary network failure'))
+            .mockResolvedValueOnce(undefined);
+
+        await channel.sendPhoto('12345', '/tmp/test.png', 'preview');
+        expect(bot.api.sendPhoto).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(5000);
+
+        expect(bot.api.sendPhoto).toHaveBeenCalledTimes(2);
     });
 });

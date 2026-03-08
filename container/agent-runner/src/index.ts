@@ -28,6 +28,7 @@ interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  singleTurn?: boolean;     // one-shot containers (media analysis, summarization) — skip conversation loop
   assistantName?: string;
   secrets?: Record<string, string>;
   mediaPath?: string;       // host-side path; container sees file at /workspace/media/<basename>
@@ -208,6 +209,16 @@ const BLOCKED_GH_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /gh\s+api\s+\/orgs\//,       reason: 'Accessing org data outside client scope' },
 ];
 
+// Destructive shell commands that can wipe or destabilize website project folders.
+const BLOCKED_DESTRUCTIVE_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
+  { pattern: /\brm\s+-[^\n]*r[^\n]*f[^\n]*\s+(\.|\/workspace\/group|\/workspace\/group\/\*|\*)\b/, reason: 'Refusing destructive recursive delete in workspace' },
+  { pattern: /\bgit\s+clean\s+-[^\n]*f[^\n]*d[^\n]*x\b/, reason: 'Refusing git clean -fdx in workspace' },
+  { pattern: /\bgit\s+reset\s+--hard\b/, reason: 'Refusing git reset --hard in workspace' },
+  { pattern: /\bgit\s+rm\b[^\n]*\bindex\.html\b/, reason: 'Refusing to remove index.html' },
+  { pattern: /\brm\b[^\n]*\bindex\.html\b/, reason: 'Refusing to delete index.html' },
+  { pattern: /\bfind\b[^\n]*\/workspace\/group[^\n]*-delete\b/, reason: 'Refusing find -delete in workspace' },
+];
+
 function createSanitizeBashHook(): HookCallback {
   return async (input, _toolUseId, _context) => {
     const preInput = input as PreToolUseHookInput;
@@ -225,6 +236,22 @@ function createSanitizeBashHook(): HookCallback {
               ...(preInput.tool_input as Record<string, unknown>),
               // Replace with a harmless echo that explains the block
               command: `echo '[SCOPE GUARD] Command blocked: ${reason}. You may only access repos created for this client in this project.' && exit 1`,
+            },
+          },
+        };
+      }
+    }
+
+    // Block known destructive commands in /workspace/group.
+    for (const { pattern, reason } of BLOCKED_DESTRUCTIVE_PATTERNS) {
+      if (pattern.test(command)) {
+        log(`[safety-guard] Blocked command matching ${pattern}: ${reason}`);
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            updatedInput: {
+              ...(preInput.tool_input as Record<string, unknown>),
+              command: `echo '[SAFETY GUARD] Command blocked: ${reason}. Use non-destructive edits and keep project files intact.' && exit 1`,
             },
           },
         };
@@ -559,6 +586,10 @@ ${containerInput.prompt}`
     return;
   }
 
+  // Single-turn containers (media analysis, summarization) exit immediately after one result.
+  // They must not enter the IPC wait loop or they deadlock the queue.
+  const isSingleTurn = !!containerInput.singleTurn;
+
   if (!hasAnthropicKey) {
     writeOutput({ status: 'error', result: null, error: 'No AI backend key found (GEMINI_API_KEY or ANTHROPIC_API_KEY required)' });
     process.exit(1);
@@ -630,6 +661,12 @@ ${containerInput.prompt}`
         break;
       }
 
+      // Single-turn containers exit after the first result — no IPC loop.
+      if (isSingleTurn) {
+        log('Single-turn mode, exiting after first result');
+        break;
+      }
+
       // Emit session update so host can track it
       writeOutput({ status: 'success', result: null, newSessionId: sessionId });
 
@@ -668,6 +705,42 @@ ${containerInput.prompt}`
     });
     process.exit(1);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Gemini conversation history persistence
+// ---------------------------------------------------------------------------
+interface GeminiHistoryEntry {
+  role: 'user' | 'model';
+  parts: Array<{ text: string }>;
+}
+
+const MAX_HISTORY_ENTRIES = 40; // 20 exchanges × 2 (user + model)
+
+function getGeminiHistoryPath(chatJid: string): string {
+  const safeChatId = chatJid.replace(/[^a-zA-Z0-9._-]/g, '_');
+  return `/workspace/group/.gemini-chat-history.${safeChatId}.json`;
+}
+
+function loadGeminiHistory(chatJid: string): GeminiHistoryEntry[] {
+  const scopedPath = getGeminiHistoryPath(chatJid);
+  const legacyPath = '/workspace/group/.gemini-chat-history.json';
+  try {
+    if (fs.existsSync(scopedPath)) {
+      return JSON.parse(fs.readFileSync(scopedPath, 'utf-8'));
+    }
+    if (fs.existsSync(legacyPath)) {
+      return JSON.parse(fs.readFileSync(legacyPath, 'utf-8'));
+    }
+  } catch { /* ignore */ }
+  return [];
+}
+
+function saveGeminiHistory(chatJid: string, history: GeminiHistoryEntry[]): void {
+  try {
+    const trimmed = history.slice(-MAX_HISTORY_ENTRIES);
+    fs.writeFileSync(getGeminiHistoryPath(chatJid), JSON.stringify(trimmed));
+  } catch { /* ignore */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -755,14 +828,24 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
     if (fs.existsSync(p)) { systemInstruction = fs.readFileSync(p, 'utf-8'); break; }
   }
 
-  const chat = ai.chats.create({
+  // Load persistent conversation history so the bot remembers prior messages
+  const chatHistory = loadGeminiHistory(containerInput.chatJid);
+  log(`Loaded ${chatHistory.length} Gemini history entries`);
+
+  const createChat = () => ai.chats.create({
     model: 'gemini-3-flash-preview',
     config: {
       systemInstruction,
       // @ts-ignore — tools shape accepted at runtime
       tools: [{ functionDeclarations: tools }],
     },
+    // @ts-ignore — history seeds the chat with prior conversation
+    history: chatHistory,
   });
+  let chat = createChat();
+
+  // Track the plain-text version of each user turn for history recording.
+  let humanPrompt = initialPrompt;
 
   // Build initial user message — for Gemini, inject media inline if available.
   let userMessage: string | object = initialPrompt;
@@ -771,21 +854,38 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
     const containerMediaPath = `/workspace/media/${mediaBasename}`;
     if (fs.existsSync(containerMediaPath)) {
       try {
-        const mimeGuess = (() => {
-          const ext = path.extname(mediaBasename).toLowerCase();
-          const map: Record<string, string> = {
-            '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
-            '.gif': 'image/gif', '.webp': 'image/webp', '.pdf': 'application/pdf',
-          };
-          return map[ext] || 'application/octet-stream';
-        })();
-        const fileData = fs.readFileSync(containerMediaPath);
-        const b64 = fileData.toString('base64');
-        userMessage = [
-          { text: initialPrompt },
-          { inlineData: { mimeType: mimeGuess, data: b64 } },
-        ];
-        log(`Injected inline media into Gemini message: ${containerMediaPath} (${mimeGuess})`);
+        const ext = path.extname(mediaBasename).toLowerCase();
+        const mimeMap: Record<string, string> = {
+          '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+          '.gif': 'image/gif', '.webp': 'image/webp', '.pdf': 'application/pdf',
+          '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.avi': 'video/x-msvideo',
+          '.webm': 'video/webm', '.mkv': 'video/x-matroska', '.3gp': 'video/3gpp',
+        };
+        const mimeGuess = mimeMap[ext] || 'application/octet-stream';
+
+        if (mimeGuess.startsWith('video/')) {
+          // Upload video via Files API — inline base64 is too large and unsupported for video
+          log(`Uploading video via Files API: ${containerMediaPath} (${mimeGuess})`);
+          const videoBuffer = fs.readFileSync(containerMediaPath);
+          // @ts-ignore — SDK accepts Blob as file parameter
+          const uploadResp = await ai.files.upload({
+            file: new Blob([videoBuffer], { type: mimeGuess }),
+            config: { mimeType: mimeGuess, displayName: mediaBasename },
+          });
+          userMessage = [
+            { text: initialPrompt },
+            { fileData: { mimeType: (uploadResp as any).mimeType ?? mimeGuess, fileUri: (uploadResp as any).uri } },
+          ];
+          log(`Video uploaded to Files API: ${(uploadResp as any).uri}`);
+        } else {
+          const fileData = fs.readFileSync(containerMediaPath);
+          const b64 = fileData.toString('base64');
+          userMessage = [
+            { text: initialPrompt },
+            { inlineData: { mimeType: mimeGuess, data: b64 } },
+          ];
+          log(`Injected inline media into Gemini message: ${containerMediaPath} (${mimeGuess})`);
+        }
       } catch (err) {
         log(`Failed to read media for Gemini inline: ${err instanceof Error ? err.message : String(err)}`);
         userMessage = initialPrompt + `\n\n<uploaded_file path="${containerMediaPath}" />`;
@@ -793,16 +893,96 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
     }
   }
 
-  const MAX_TURNS = 20;
+  const MAX_TURNS = 30;
+  const CONTEXT_RESET_TURNS = 8; // Recreate chat periodically to prevent context window overflow
+  let turnsSinceReset = 0;
+
+  // Single-turn containers (media analysis, summarization) skip the conversation loop entirely.
+  if (containerInput.singleTurn) {
+    log('Single-turn Gemini mode — no conversation loop');
+    // Run exactly one tool-use cycle then return.
+    for (let turn = 0; turn < MAX_TURNS; turn++) {
+      let resp;
+      try {
+        // @ts-ignore
+        resp = await chat.sendMessage({ message: userMessage });
+      } catch (err) {
+        writeOutput({ status: 'error', result: null, error: `Gemini error: ${err instanceof Error ? err.message : String(err)}` });
+        return;
+      }
+      const text: string = (resp as any).text ?? '';
+      // @ts-ignore
+      const fnCalls: Array<{ name: string; args: Record<string, unknown>; id?: string }> = (resp as any).functionCalls ?? [];
+      if (!fnCalls.length) {
+        writeOutput({ status: 'success', result: text || '(no response)' });
+        return;
+      }
+      const fnResponses: object[] = [];
+      for (const fn of fnCalls) {
+        let result = '';
+        try {
+          const args = fn.args as Record<string, string>;
+          if (fn.name === 'bash') {
+            result = execSync(args.command, { cwd: '/workspace/group', timeout: 30000 }).toString();
+          } else if (fn.name === 'read_file') {
+            result = fs.existsSync(args.path) ? fs.readFileSync(args.path, 'utf-8') : 'File not found';
+          } else if (fn.name === 'write_file') {
+            fs.mkdirSync(path.dirname(args.path), { recursive: true });
+            fs.writeFileSync(args.path, args.content);
+            result = 'File written';
+          }
+        } catch (err) {
+          result = `Error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+        fnResponses.push({ functionResponse: { ...(fn.id ? { id: fn.id } : {}), name: fn.name, response: { result: result.slice(0, 4000) } } });
+      }
+      userMessage = fnResponses;
+    }
+    writeOutput({ status: 'success', result: 'Done' });
+    return;
+  }
+
+  // Outer loop: each iteration handles one user message → final answer cycle.
+  // After delivering an answer we wait for the next IPC message so the container
+  // can hold a multi-turn conversation without losing history.
+  conversationLoop: while (true) {
+  let gotFinalAnswer = false;
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
+    // Proactively recreate chat to prevent context window from filling up
+    if (turnsSinceReset > 0 && turnsSinceReset % CONTEXT_RESET_TURNS === 0) {
+      log(`Resetting Gemini chat context after ${CONTEXT_RESET_TURNS} turns to prevent overflow`);
+      chat = createChat();
+      if (typeof userMessage !== 'string') {
+        userMessage = '[Context reset: continuing from prior conversation state. Proceed with the task.]';
+      }
+    }
+
     let resp;
     try {
       // @ts-ignore
       resp = await chat.sendMessage({ message: userMessage });
+      turnsSinceReset++;
     } catch (err) {
-      writeOutput({ status: 'error', result: null, error: `Gemini error: ${err instanceof Error ? err.message : String(err)}` });
-      return;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      // On context overflow errors, reset the chat and retry once
+      if (turnsSinceReset > 0 && /context|token|length|exceed|too large/i.test(errMsg)) {
+        log(`Context overflow detected: ${errMsg}. Resetting chat and retrying.`);
+        chat = createChat();
+        turnsSinceReset = 0;
+        userMessage = '[Context reset due to length limit. Continue the current task from where you left off.]';
+        try {
+          // @ts-ignore
+          resp = await chat.sendMessage({ message: userMessage });
+          turnsSinceReset++;
+        } catch (retryErr) {
+          writeOutput({ status: 'error', result: null, error: `Gemini error after context reset: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}` });
+          return;
+        }
+      } else {
+        writeOutput({ status: 'error', result: null, error: `Gemini error: ${errMsg}` });
+        return;
+      }
     }
 
     // Extract text
@@ -811,9 +991,14 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
     const fnCalls: Array<{ name: string; args: Record<string, unknown>; id?: string }> = (resp as any).functionCalls ?? [];
 
     if (!fnCalls.length) {
-      // Final text answer — deliver and exit
+      // Save this exchange to persistent history
+      chatHistory.push({ role: 'user', parts: [{ text: humanPrompt }] });
+      chatHistory.push({ role: 'model', parts: [{ text: text || '(no response)' }] });
+      saveGeminiHistory(containerInput.chatJid, chatHistory);
+
       writeOutput({ status: 'success', result: text || '(no response)' });
-      return;
+      gotFinalAnswer = true;
+      break;
     }
 
     // Execute tool calls
@@ -862,16 +1047,42 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
       });
     }
 
-    if (shouldClose()) break;
+    if (shouldClose()) break conversationLoop;
     const ipcMessages = drainIpcInput();
     if (ipcMessages.length > 0) {
       // Append IPC messages as extra user text alongside tool results
       fnResponses.push({ text: ipcMessages.join('\n') } as object);
     }
     userMessage = fnResponses;
+  } // end tool-use loop
+
+  if (!gotFinalAnswer) {
+    // Hit MAX_TURNS without a natural conclusion
+    writeOutput({ status: 'success', result: 'Done' });
+    break;
   }
 
-  writeOutput({ status: 'success', result: 'Done' });
+  // Signal host that we are idle and ready for the next message
+  writeOutput({ status: 'success', result: null });
+
+  if (shouldClose()) break;
+
+  // Wait for the next user message via IPC (or _close sentinel)
+  log('Gemini: waiting for next IPC message...');
+  const nextMessage = await waitForIpcMessage();
+  if (nextMessage === null) {
+    log('Gemini: close sentinel received, exiting conversation loop');
+    break;
+  }
+
+  log(`Gemini: got new message (${nextMessage.length} chars), continuing conversation`);
+  humanPrompt = nextMessage;
+  userMessage = nextMessage;
+  // Recreate chat seeded with updated history for the new turn
+  chat = createChat();
+  turnsSinceReset = 0;
+
+  } // end conversationLoop
 }
 
 main();

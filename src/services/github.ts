@@ -70,8 +70,26 @@ export class GitHubService {
             });
             const treeSha = commitData.commit.tree.sha;
 
+            // Fetch the current tree state to ensure we merge instead of replace
+            const { data: currentTree } = await this.octokit.git.getTree({
+              owner,
+              repo,
+              tree_sha: treeSha,
+                            recursive: 'true',
+            });
+
+            // Keep all existing files that aren't being updated
+            const existingFiles = currentTree.tree
+              .filter((item) => item.type === 'blob' && !files.find((f) => f.path === item.path))
+              .map((item) => ({
+                path: item.path as string,
+                mode: item.mode as '100644',
+                type: 'blob' as const,
+                sha: item.sha as string,
+              }));
+
             // Create blobs and tree
-            const tree = await Promise.all(
+            const newBlobs = await Promise.all(
                 files.map(async (f) => {
                     const { data: blob } = await this.octokit.git.createBlob({
                         owner,
@@ -92,7 +110,7 @@ export class GitHubService {
                 owner,
                 repo,
                 base_tree: treeSha,
-                tree,
+                tree: [...existingFiles, ...newBlobs],
             });
 
             const { data: newCommit } = await this.octokit.git.createCommit({
