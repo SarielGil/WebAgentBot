@@ -754,8 +754,9 @@ export async function processTaskIpc(
         );
         break;
       }
-      // Send the reply to the client
-      await deps.sendMessage(targetJid, replyText);
+      // Send the reply to the client with support team header
+      const supportMessage = `📞 <b>Support Team</b>\n\n` + replyText;
+      await deps.sendMessage(targetJid, supportMessage);
       // Confirm back to admin
       const adminGrp = Object.values(registeredGroups).find(
         (g) => g.folder === MAIN_GROUP_FOLDER,

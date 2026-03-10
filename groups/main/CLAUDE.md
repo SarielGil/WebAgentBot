@@ -216,13 +216,13 @@ echo '{"type":"admin_reply","targetJid":"c:CLIENT_CHAT_ID","message":"Your reply
 ```
 
 Replace `c:CLIENT_CHAT_ID` with the Chat ID from the escalation message. The system will:
-1. Send your reply to the client's chat
+1. Send your reply to the client's chat with a "📞 Support Team" header
 2. Confirm back to you: "✅ Reply sent to ClientName"
 
 **Rules:**
 - Always use the `admin_reply` task type — never write directly to `/workspace/ipc/messages/`
 - Copy the Chat ID exactly as shown in the escalation (including the `c:` prefix)
-- Keep replies professional and helpful
+- Keep replies professional and helpful — the "Support Team" header is added automatically
 - If you need more context, check `conversations/` for the client's chat history
 - You can reply multiple times — each reply is a separate task file
 
