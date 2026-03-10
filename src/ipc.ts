@@ -16,7 +16,9 @@ import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { githubService, domainService, searchService } from './index.js';
 import { slackChannel } from './index.js';
+import { queue } from './index.js';
 import { RegisteredGroup } from './types.js';
+import { sendPoolMessage } from './channels/telegram.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
@@ -24,6 +26,10 @@ export interface IpcDeps {
     jid: string,
     filePath: string,
     caption?: string,
+  ) => Promise<void>;
+  sendMediaGroup?: (
+    jid: string,
+    photos: Array<{ filePath: string; caption?: string }>,
   ) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
@@ -38,6 +44,44 @@ export interface IpcDeps {
 }
 
 let ipcWatcherRunning = false;
+const IPC_DUPLICATE_WINDOW_MS = 15_000;
+const recentIpcMessages = new Map<string, number>();
+
+function normalizeIpcMessageText(text: string): string {
+  return text.trim();
+}
+
+export function shouldSuppressDuplicateIpcMessage(
+  sourceGroup: string,
+  chatJid: string,
+  text: string,
+  sender?: string,
+  now = Date.now(),
+): boolean {
+  const normalizedText = normalizeIpcMessageText(text);
+  if (!normalizedText) {
+    return false;
+  }
+
+  for (const [key, timestamp] of recentIpcMessages.entries()) {
+    if (now - timestamp > IPC_DUPLICATE_WINDOW_MS) {
+      recentIpcMessages.delete(key);
+    }
+  }
+
+  const dedupeKey = [sourceGroup, chatJid, sender || '', normalizedText].join('::');
+  const previousTimestamp = recentIpcMessages.get(dedupeKey);
+  recentIpcMessages.set(dedupeKey, now);
+
+  return (
+    previousTimestamp !== undefined &&
+    now - previousTimestamp <= IPC_DUPLICATE_WINDOW_MS
+  );
+}
+
+export function _resetRecentIpcMessagesForTests(): void {
+  recentIpcMessages.clear();
+}
 
 export function startIpcWatcher(deps: IpcDeps): void {
   if (ipcWatcherRunning) {
@@ -71,6 +115,8 @@ export function startIpcWatcher(deps: IpcDeps): void {
       const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
 
       // Process messages from this group's IPC directory
+      // Collect photos per chatJid so we can send them as a media group (album)
+      const pendingPhotos = new Map<string, Array<{ filePath: string; caption?: string; sourceGroup: string }>>();
       try {
         if (fs.existsSync(messagesDir)) {
           const messageFiles = fs
@@ -81,6 +127,22 @@ export function startIpcWatcher(deps: IpcDeps): void {
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               if (data.type === 'message' && data.chatJid && data.text) {
+                if (
+                  shouldSuppressDuplicateIpcMessage(
+                    sourceGroup,
+                    data.chatJid,
+                    data.text,
+                    data.sender,
+                  )
+                ) {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup, sender: data.sender },
+                    'Suppressed duplicate IPC message',
+                  );
+                  fs.unlinkSync(filePath);
+                  continue;
+                }
+
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = Object.values(registeredGroups).find(
                   (g) => g.jid === data.chatJid,
@@ -89,9 +151,23 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
-                  await deps.sendMessage(data.chatJid, data.text);
+                  // Route swarm messages (with a sender identity) through the bot pool
+                  const isTelegramJid =
+                    /^-?\d+$/.test(data.chatJid) || /^c:-?\d+$/.test(data.chatJid);
+                  if (data.sender && isTelegramJid) {
+                    await sendPoolMessage(
+                      data.chatJid,
+                      data.text,
+                      data.sender,
+                      sourceGroup,
+                      (jid, text) => deps.sendMessage(jid, text),
+                    );
+                  } else {
+                    await deps.sendMessage(data.chatJid, data.text);
+                  }
+                  queue.markIpcOutputSent(sourceGroup);
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup },
+                    { chatJid: data.chatJid, sourceGroup, sender: data.sender },
                     'IPC message sent',
                   );
                 } else {
@@ -119,19 +195,15 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       'media',
                       path.basename(data.mediaFile),
                     );
-                    await deps.sendPhoto(
-                      data.chatJid,
-                      hostMediaPath,
-                      data.caption,
-                    );
-                    logger.info(
-                      { chatJid: data.chatJid, sourceGroup },
-                      'IPC photo sent',
-                    );
-                    // Clean up the media file after delivery
-                    try {
-                      fs.unlinkSync(hostMediaPath);
-                    } catch {}
+                    // Batch photos for album sending — collect now, send after loop
+                    if (!pendingPhotos.has(data.chatJid)) {
+                      pendingPhotos.set(data.chatJid, []);
+                    }
+                    pendingPhotos.get(data.chatJid)!.push({
+                      filePath: hostMediaPath,
+                      caption: data.caption || undefined,
+                      sourceGroup,
+                    });
                   } else {
                     logger.warn(
                       { chatJid: data.chatJid },
@@ -165,6 +237,36 @@ export function startIpcWatcher(deps: IpcDeps): void {
           { err, sourceGroup },
           'Error reading IPC messages directory',
         );
+      }
+
+      // Send batched photos as media groups (albums)
+      for (const [chatJid, photos] of pendingPhotos) {
+        try {
+          if (deps.sendMediaGroup && photos.length > 1) {
+            await deps.sendMediaGroup(
+              chatJid,
+              photos.map((p) => ({ filePath: p.filePath, caption: p.caption })),
+            );
+          } else if (deps.sendPhoto) {
+            for (const p of photos) {
+              await deps.sendPhoto(chatJid, p.filePath, p.caption);
+            }
+          }
+          // Mark IPC output sent for each source group that contributed photos
+          const sourceGroups = new Set(photos.map((p) => p.sourceGroup));
+          for (const sg of sourceGroups) {
+            queue.markIpcOutputSent(sg);
+          }
+          logger.info(
+            { chatJid, count: photos.length, album: photos.length > 1 },
+            'IPC photos delivered',
+          );
+        } catch (err) {
+          logger.error(
+            { chatJid, count: photos.length, err },
+            'Error sending batched IPC photos',
+          );
+        }
       }
 
       // Process tasks from this group's IPC directory

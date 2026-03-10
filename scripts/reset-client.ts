@@ -55,13 +55,19 @@ function stopGroupContainers(folder: string): string[] {
 
 const stoppedContainers = stopGroupContainers(groupFolder);
 
-const geminiHistoryPaths = fs.existsSync(groupPath)
+const chatHistoryPaths = fs.existsSync(groupPath)
   ? fs.readdirSync(groupPath)
-      .filter((name) => name === '.gemini-chat-history.json' || name.startsWith('.gemini-chat-history.'))
+      .filter(
+        (name) =>
+          name === '.gemini-chat-history.json' ||
+          name.startsWith('.gemini-chat-history.') ||
+          name === '.grok-chat-history.json' ||
+          name.startsWith('.grok-chat-history.'),
+      )
       .map((name) => path.join(groupPath, name))
   : [];
 
-for (const historyPath of geminiHistoryPaths) {
+for (const historyPath of chatHistoryPaths) {
   removePath(historyPath);
 }
 
@@ -118,7 +124,7 @@ if (chatJid) {
   console.log(`Chat JID: ${chatJid}`);
 }
 console.log(`Stopped containers: ${stoppedContainers.length > 0 ? stoppedContainers.join(', ') : '(none)'}`);
-for (const historyPath of geminiHistoryPaths) {
+for (const historyPath of chatHistoryPaths) {
   console.log(`Removed: ${historyPath}`);
 }
 console.log(`Removed: ${groupSessionsPath}`);

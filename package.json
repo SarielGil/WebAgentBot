@@ -26,7 +26,12 @@
     "test:web:preview": "bash scripts/run-web-test.sh preview",
     "test:web:photo": "bash scripts/run-web-test.sh photo",
     "test:web:e2e": "bash scripts/run-web-test.sh e2e",
-    "test:web:verbose": "bash scripts/run-web-test.sh e2e --verbose"
+    "test:web:verbose": "bash scripts/run-web-test.sh e2e --verbose",
+    "test:flow": "bash scripts/test-flow.sh",
+    "test:flow:verbose": "bash scripts/test-flow.sh --verbose",
+    "test:e2e": "tsx scripts/test-flow-e2e.ts",
+    "test:e2e:verbose": "tsx scripts/test-flow-e2e.ts --verbose",
+    "test:e2e:clean": "npm run reset:client -- client1 c:774133756 --hard && npm run docker:build && npm run test:e2e -- --verbose"
   },
   "dependencies": {
     "@google/genai": "^1.0.0",

@@ -352,6 +352,9 @@ describe('GroupQueue', () => {
     // Container becomes idle
     queue.notifyIdle('group1@g.us');
 
+    // Mark the group ready (simulates main agent phase starting)
+    queue.markReady('group1@g.us');
+
     // A new user message arrives — resets idleWaiting
     queue.sendMessage('group1@g.us', 'hello');
 
@@ -442,6 +445,40 @@ describe('GroupQueue', () => {
       (call) => typeof call[0] === 'string' && call[0].endsWith('_close'),
     );
     expect(closeWrites).toHaveLength(1);
+
+    resolveProcess!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('sendMessage returns false during preparation phase and true after markReady', async () => {
+    const fs = await import('fs');
+    let resolveProcess: () => void;
+
+    const processMessages = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        resolveProcess = resolve;
+      });
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess(
+      'group1@g.us',
+      {} as any,
+      'container-1',
+      'test-group',
+    );
+
+    // During preparation phase, sendMessage should return false
+    const sent1 = queue.sendMessage('group1@g.us', 'hello during prep');
+    expect(sent1).toBe(false);
+
+    // After markReady, sendMessage should succeed
+    queue.markReady('group1@g.us');
+    const sent2 = queue.sendMessage('group1@g.us', 'hello after ready');
+    expect(sent2).toBe(true);
 
     resolveProcess!();
     await vi.advanceTimersByTimeAsync(10);

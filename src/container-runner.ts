@@ -243,6 +243,7 @@ function readSecrets(): Record<string, string> {
     'ANTHROPIC_API_KEY',
     'CLAUDE_CODE_OAUTH_TOKEN',
     'GEMINI_API_KEY',
+    'XAI_API_KEY',
     'GITHUB_TOKEN',
     'BRAVE_API_KEY',
   ]);

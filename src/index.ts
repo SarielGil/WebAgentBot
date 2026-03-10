@@ -9,9 +9,10 @@ import {
   MAIN_GROUP_FOLDER,
   MEDIA_DIR,
   POLL_INTERVAL,
+  TELEGRAM_BOT_POOL,
   TRIGGER_PATTERN,
 } from './config.js';
-import { TelegramChannel } from './channels/telegram.js';
+import { TelegramChannel, initBotPool } from './channels/telegram.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -184,12 +185,11 @@ function shouldRefreshSummary(
   missedMessages: NewMessage[],
   hasExistingSummary: boolean,
 ): boolean {
-  if (!hasExistingSummary) return true;
-  if (missedMessages.length >= 3) return true;
-  return missedMessages.some((m) => {
-    const contentLen = (m.content || '').trim().length;
-    return contentLen >= 40 || !!m.media_metadata;
-  });
+  // Only summarize on first encounter or when there are many new messages.
+  // Avoids spinning up an extra container (and adding 10-15s) on every single turn.
+  if (!hasExistingSummary) return false; // skip initial summary — wait until there's real history
+  if (missedMessages.length >= 10) return true;
+  return false;
 }
 
 async function refreshConversationSummary(
@@ -466,6 +466,13 @@ Be concrete and compact.`,
   }
   const finalPrompt = contextPrompt + formatMessages(slidingWindow);
 
+  // Collect media paths from the current batch so the agent can see uploaded images.
+  // Only pass the most recent image — Gemini multimodal input accepts one image at a time.
+  const mediaMessages = slidingWindow.filter((m) => m.media_path && fs.existsSync(m.media_path));
+  const latestMediaPath = mediaMessages.length > 0
+    ? mediaMessages[mediaMessages.length - 1].media_path
+    : undefined;
+
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
   const previousCursor = lastAgentTimestamp[queueKey] || '';
@@ -496,7 +503,16 @@ Be concrete and compact.`,
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, finalPrompt, chatJid, async (result) => {
+  // Preparation phase complete (media analysis + summarization done).
+  // Mark the queue slot as ready so that piped IPC messages reach the
+  // main agent container instead of being consumed by singleTurn sub-containers.
+  queue.markReady(queueKey);
+
+  // Register idle-timer reset callback so that piping a message via
+  // sendMessage() defers _close — the agent is about to receive work.
+  queue.setOnMessagePiped(queueKey, resetIdleTimer);
+
+  const onAgentOutput = async (result: ContainerOutput) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw =
@@ -506,7 +522,10 @@ Be concrete and compact.`,
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
-      if (text) {
+      // Skip bare "Done"/"done" outputs — agent uses these as task-completion
+      // signals but they look broken when sent to the user as a raw message.
+      const isDoneSignal = /^done\.?$/i.test(text);
+      if (text && !isDoneSignal) {
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
       } else if (raw.trim()) {
@@ -527,10 +546,13 @@ Be concrete and compact.`,
     if (result.status === 'error') {
       hadError = true;
     }
-  });
+  };
+
+  const output = await runAgent(group, finalPrompt, chatJid, onAgentOutput, latestMediaPath);
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
+  queue.clearOnMessagePiped(queueKey);
 
   // Delete this group's media files — they're no longer needed after the agent has processed them.
   if (fs.existsSync(groupMediaDir)) {
@@ -548,12 +570,17 @@ Be concrete and compact.`,
     }
   }
 
+  // Check if IPC watcher delivered messages/photos to the user on behalf
+  // of this container (agent used send_message/send_photo tools).
+  const ipcSentOutput = queue.hasIpcOutputSent(queueKey);
+  queue.clearIpcOutputSent(queueKey);
+
   if (output === 'error' || hadError) {
-    // If we already sent output to the user, don't roll back the cursor —
-    // the user got their response and re-processing would send duplicates.
-    if (outputSentToUser) {
+    // If we already sent output to the user (via streaming OR IPC),
+    // don't roll back the cursor — re-processing would send duplicates.
+    if (outputSentToUser || ipcSentOutput) {
       logger.warn(
-        { group: group.name },
+        { group: group.name, viaStreaming: outputSentToUser, viaIpc: ipcSentOutput },
         'Agent error after output was sent, skipping cursor rollback to prevent duplicates',
       );
       return true;
@@ -576,6 +603,7 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  mediaPath?: string,
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const session = sessions[group.folder];
@@ -640,6 +668,7 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        mediaPath,
       },
       (proc, containerName) =>
         queue.registerProcess(group.folder, proc, containerName, group.folder),
@@ -786,9 +815,21 @@ export async function routeNewMessages(
             { chatJid, queueKey, count: messagesToSend.length },
             'Piped messages to active container',
           );
-          lastAgentTimestamp[queueKey] =
-            messagesToSend[messagesToSend.length - 1].timestamp;
-          saveState();
+          // Advance cursor past the piped messages so they are not
+          // re-discovered by processGroupMessages when the container
+          // finishes.  If the container crashes before consuming the
+          // IPC file, the orphaned-IPC cleanup in group-queue will
+          // trigger a reprocessing cycle (but those messages will be
+          // gone from the cursor window — an acceptable tradeoff vs.
+          // sending visible duplicates to the user every time).
+          if (messagesToSend.length > 0) {
+            const lastPiped = messagesToSend[messagesToSend.length - 1];
+            const ts = 'timestamp' in lastPiped ? (lastPiped as { timestamp: string }).timestamp : '';
+            if (ts && (!lastAgentTimestamp[queueKey] || ts > lastAgentTimestamp[queueKey])) {
+              lastAgentTimestamp[queueKey] = ts;
+              saveState();
+            }
+          }
           // Show typing indicator while the container processes the piped message
           channel
             .setTyping?.(chatJid, true)
@@ -905,6 +946,10 @@ async function main(): Promise<void> {
   channels.push(telegram);
   await telegram.connect();
 
+  if (TELEGRAM_BOT_POOL.length > 0) {
+    await initBotPool(TELEGRAM_BOT_POOL);
+  }
+
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
@@ -933,6 +978,18 @@ async function main(): Promise<void> {
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       if (!channel.sendPhoto) return Promise.resolve(); // channel doesn't support photos
       return channel.sendPhoto(jid, filePath, caption);
+    },
+    sendMediaGroup: (jid, photos) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      if (!channel.sendMediaGroup) {
+        // Fall back to individual photos
+        return photos.reduce(
+          (p, photo) => p.then(() => channel.sendPhoto?.(jid, photo.filePath, photo.caption) ?? Promise.resolve()),
+          Promise.resolve(),
+        );
+      }
+      return channel.sendMediaGroup(jid, photos);
     },
     registeredGroups: () => registeredGroups,
     registerGroup,

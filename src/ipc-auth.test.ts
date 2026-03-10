@@ -8,7 +8,12 @@ import {
   getTaskById,
   setRegisteredGroup,
 } from './db.js';
-import { processTaskIpc, IpcDeps } from './ipc.js';
+import {
+  _resetRecentIpcMessagesForTests,
+  processTaskIpc,
+  IpcDeps,
+  shouldSuppressDuplicateIpcMessage,
+} from './ipc.js';
 import { RegisteredGroup } from './types.js';
 
 // Set up registered groups used across tests
@@ -41,6 +46,7 @@ let deps: IpcDeps;
 
 beforeEach(() => {
   _initTestDatabase();
+  _resetRecentIpcMessagesForTests();
 
   groups = {
     main: MAIN_GROUP,
@@ -65,6 +71,74 @@ beforeEach(() => {
     getAvailableGroups: () => [],
     writeGroupsSnapshot: () => {},
   };
+});
+
+describe('IPC duplicate suppression', () => {
+  it('suppresses the same message sent twice within the dedupe window', () => {
+    expect(
+      shouldSuppressDuplicateIpcMessage(
+        'other-group',
+        'other@g.us',
+        'Hello there',
+        undefined,
+        1_000,
+      ),
+    ).toBe(false);
+
+    expect(
+      shouldSuppressDuplicateIpcMessage(
+        'other-group',
+        'other@g.us',
+        'Hello there',
+        undefined,
+        10_000,
+      ),
+    ).toBe(true);
+  });
+
+  it('does not suppress after the dedupe window expires', () => {
+    expect(
+      shouldSuppressDuplicateIpcMessage(
+        'other-group',
+        'other@g.us',
+        'Hello there',
+        undefined,
+        1_000,
+      ),
+    ).toBe(false);
+
+    expect(
+      shouldSuppressDuplicateIpcMessage(
+        'other-group',
+        'other@g.us',
+        'Hello there',
+        undefined,
+        17_000,
+      ),
+    ).toBe(false);
+  });
+
+  it('tracks duplicates separately by sender identity', () => {
+    expect(
+      shouldSuppressDuplicateIpcMessage(
+        'other-group',
+        'other@g.us',
+        'Hello there',
+        'Agent A',
+        1_000,
+      ),
+    ).toBe(false);
+
+    expect(
+      shouldSuppressDuplicateIpcMessage(
+        'other-group',
+        'other@g.us',
+        'Hello there',
+        'Agent B',
+        5_000,
+      ),
+    ).toBe(false);
+  });
 });
 
 // --- schedule_task authorization ---

@@ -44,6 +44,7 @@ vi.mock('fs', async () => {
     ...actual,
     default: {
       ...actual,
+      existsSync: vi.fn(() => true),
       createReadStream: vi.fn(() => new PassThrough()),
       createWriteStream: vi.fn(() => ({
         on: vi.fn((event, cb) => {
@@ -84,6 +85,16 @@ describe('Telegram Media Handling', () => {
     vi.useRealTimers();
   });
 
+  async function getMessageHandler() {
+    await channel.connect();
+    const bot = (channel as any).bots[0];
+    const messageCall = bot.on.mock.calls.find(
+      (call: unknown[]) => call[0] === 'message',
+    );
+    expect(messageCall).toBeTruthy();
+    return messageCall?.[1] as (ctx: any) => Promise<void>;
+  }
+
   it('identifies owner JIDs correctly', () => {
     expect(channel.ownsJid('12345')).toBe(true);
     expect(channel.ownsJid('-10012345')).toBe(true);
@@ -95,6 +106,48 @@ describe('Telegram Media Handling', () => {
     // which is private/internal to connect().
     // For now, we verified the logic in the file.
     expect(channel.name).toBe('telegram');
+  });
+
+  it('ignores inbound messages authored by bots', async () => {
+    const handleMessage = await getMessageHandler();
+
+    await handleMessage({
+      chat: { id: 12345, type: 'group', title: 'Test Group' },
+      from: { id: 999, username: 'pool_bot', first_name: 'Pool', is_bot: true },
+      message: {
+        message_id: 77,
+        date: 1_700_000_000,
+        text: 'Automated update',
+      },
+    });
+
+    expect(onMessage).not.toHaveBeenCalled();
+  });
+
+  it('forwards inbound human-authored messages', async () => {
+    const handleMessage = await getMessageHandler();
+
+    await handleMessage({
+      chat: { id: 12345, type: 'group', title: 'Test Group' },
+      from: { id: 111, username: 'alice', first_name: 'Alice', is_bot: false },
+      message: {
+        message_id: 78,
+        date: 1_700_000_001,
+        text: 'Hello',
+      },
+    });
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage).toHaveBeenCalledWith(
+      '12345',
+      expect.objectContaining({
+        id: '78',
+        sender: '111',
+        sender_name: 'alice',
+        content: 'Hello',
+        is_bot_message: false,
+      }),
+    );
   });
 
   it('retries queued messages after a transient send failure', async () => {

@@ -193,7 +193,7 @@ function createPreCompactHook(assistantName?: string): HookCallback {
 // Secrets to strip from Bash tool subprocess environments.
 // These are needed by claude-code for API auth but should never
 // be visible to commands it runs.
-const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'GEMINI_API_KEY'];
+const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'GEMINI_API_KEY', 'XAI_API_KEY'];
 
 // Tool credentials that ARE safe to expose to Bash subprocesses (gh, curl, etc.)
 const TOOL_CREDENTIAL_VARS = ['GITHUB_TOKEN', 'BRAVE_API_KEY'];
@@ -423,12 +423,15 @@ async function runQuery(
   containerInput: ContainerInput,
   sdkEnv: Record<string, string | undefined>,
   resumeAt?: string,
+  singleTurn = false,
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
   const stream = new MessageStream();
   stream.push(prompt);
 
-  // Poll IPC for follow-up messages and _close sentinel during the query
-  let ipcPolling = true;
+  // Poll IPC for follow-up messages and _close sentinel during the query.
+  // singleTurn containers skip IPC polling — they must not consume messages
+  // intended for the main agent container.
+  let ipcPolling = !singleTurn;
   let closedDuringQuery = false;
   const pollIpcDuringQuery = () => {
     if (!ipcPolling) return;
@@ -570,19 +573,25 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Determine backend: prefer Gemini if key present, else fall back to Claude
+  // Determine backend: prefer Gemini > Grok > Claude
   const secrets = containerInput.secrets as Record<string, string> | undefined;
   const hasAnthropicKey = !!(secrets?.ANTHROPIC_API_KEY || secrets?.CLAUDE_CODE_OAUTH_TOKEN);
   const hasGeminiKey = !!secrets?.GEMINI_API_KEY;
+  const hasXaiKey = !!secrets?.XAI_API_KEY;
+
+  const buildPrompt = (p: string) => containerInput.isScheduledTask
+    ? `[SCHEDULED TASK]\n\n${p}`
+    : p;
 
   if (hasGeminiKey) {
     log('Gemini key found, using Gemini as default backend');
-    const prompt = containerInput.isScheduledTask
-      ? `[SCHEDULED TASK]
+    await runGeminiFallback(containerInput, buildPrompt(containerInput.prompt));
+    return;
+  }
 
-${containerInput.prompt}`
-      : containerInput.prompt;
-    await runGeminiFallback(containerInput, prompt);
+  if (hasXaiKey) {
+    log('XAI_API_KEY found, using Grok as fallback backend');
+    await runGrokBackend(containerInput, buildPrompt(containerInput.prompt));
     return;
   }
 
@@ -591,7 +600,7 @@ ${containerInput.prompt}`
   const isSingleTurn = !!containerInput.singleTurn;
 
   if (!hasAnthropicKey) {
-    writeOutput({ status: 'error', result: null, error: 'No AI backend key found (GEMINI_API_KEY or ANTHROPIC_API_KEY required)' });
+    writeOutput({ status: 'error', result: null, error: 'No AI backend key found (XAI_API_KEY, GEMINI_API_KEY, or ANTHROPIC_API_KEY required)' });
     process.exit(1);
   }
 
@@ -635,7 +644,7 @@ ${containerInput.prompt}`
       log(`Media file not found at expected container path: ${containerMediaPath}`);
     }
   }
-  const pending = drainIpcInput();
+  const pending = isSingleTurn ? [] : drainIpcInput();
   if (pending.length > 0) {
     log(`Draining ${pending.length} pending IPC messages into initial prompt`);
     prompt += '\n' + pending.join('\n');
@@ -686,7 +695,7 @@ ${containerInput.prompt}`
     const errorMessage = err instanceof Error ? err.message : String(err);
     log(`Claude error: ${errorMessage}`);
 
-    // Fallback to Gemini if Claude fails and Gemini key is available
+    // Fallback to Gemini/Grok if Claude fails
     if (hasGeminiKey) {
       log('Falling back to Gemini...');
       try {
@@ -694,6 +703,15 @@ ${containerInput.prompt}`
         return;
       } catch (geminiErr) {
         log(`Gemini fallback also failed: ${geminiErr instanceof Error ? geminiErr.message : String(geminiErr)}`);
+      }
+    }
+    if (hasXaiKey) {
+      log('Falling back to Grok...');
+      try {
+        await runGrokBackend(containerInput, prompt);
+        return;
+      } catch (grokErr) {
+        log(`Grok fallback also failed: ${grokErr instanceof Error ? grokErr.message : String(grokErr)}`);
       }
     }
 
@@ -705,6 +723,477 @@ ${containerInput.prompt}`
     });
     process.exit(1);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Grok (xAI) conversation history persistence
+// ---------------------------------------------------------------------------
+interface GrokHistoryEntry {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+const MAX_GROK_HISTORY_ENTRIES = 40;
+
+function getGrokHistoryPath(chatJid: string): string {
+  const safeChatId = chatJid.replace(/[^a-zA-Z0-9._-]/g, '_');
+  return `/workspace/group/.grok-chat-history.${safeChatId}.json`;
+}
+
+function loadGrokHistory(chatJid: string): GrokHistoryEntry[] {
+  const p = getGrokHistoryPath(chatJid);
+  try {
+    if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf-8'));
+  } catch { /* ignore */ }
+  return [];
+}
+
+function saveGrokHistory(chatJid: string, history: GrokHistoryEntry[]): void {
+  try {
+    const trimmed = history.slice(-MAX_GROK_HISTORY_ENTRIES);
+    fs.writeFileSync(getGrokHistoryPath(chatJid), JSON.stringify(trimmed));
+  } catch { /* ignore */ }
+}
+
+// ---------------------------------------------------------------------------
+// Parallel file generation — fires multiple independent LLM calls at once
+// ---------------------------------------------------------------------------
+
+/**
+ * Fire N independent Gemini API calls in parallel, each generating content
+ * and writing it to a file. ~2.7x faster than sequential generation.
+ */
+async function parallelGenerate(
+  tasks: Array<{ prompt: string; output_path: string }>,
+  apiKey: string,
+  backend: 'gemini' | 'grok',
+  xaiApiKey?: string,
+): Promise<string> {
+  const startTime = Date.now();
+  log(`parallel_generate: starting ${tasks.length} tasks in parallel (backend: ${backend})`);
+
+  const results = await Promise.allSettled(
+    tasks.map(async (task, i) => {
+      const taskStart = Date.now();
+      let content = '';
+
+      if (backend === 'gemini') {
+        const ai = new GoogleGenAI({ apiKey });
+        const resp = await ai.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: task.prompt,
+          config: { maxOutputTokens: 16384 },
+        });
+        content = (resp as any).text ?? '';
+      } else if (backend === 'grok' && xaiApiKey) {
+        const resp = await fetch('https://api.x.ai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${xaiApiKey}`,
+          },
+          body: JSON.stringify({
+            model: 'grok-4-1-fast-reasoning',
+            messages: [
+              { role: 'system', content: 'You are a web designer. Return ONLY the requested code, no explanations or markdown fences.' },
+              { role: 'user', content: task.prompt },
+            ],
+          }),
+        });
+        if (!resp.ok) throw new Error(`xAI API error ${resp.status}`);
+        const data = await resp.json() as any;
+        content = data.choices?.[0]?.message?.content || '';
+      }
+
+      // Strip markdown code fences if present
+      content = content.replace(/^```(?:html)?\n?/i, '').replace(/\n?```$/i, '').trim();
+
+      // Write to file
+      fs.mkdirSync(path.dirname(task.output_path), { recursive: true });
+      fs.writeFileSync(task.output_path, content);
+      const elapsed = Date.now() - taskStart;
+      log(`parallel_generate: task ${i + 1} done in ${elapsed}ms (${content.length} chars) → ${task.output_path}`);
+      return { path: task.output_path, chars: content.length, time: elapsed };
+    }),
+  );
+
+  const totalTime = Date.now() - startTime;
+  const summary = results.map((r, i) => {
+    if (r.status === 'fulfilled') {
+      return `Task ${i + 1}: ✅ ${r.value.chars} chars in ${r.value.time}ms → ${r.value.path}`;
+    } else {
+      return `Task ${i + 1}: ❌ ${r.reason?.message || 'unknown error'}`;
+    }
+  });
+
+  log(`parallel_generate: all done in ${totalTime}ms (vs ~${totalTime * tasks.length}ms sequential)`);
+  return `All ${tasks.length} tasks completed in ${totalTime}ms (parallel):\n${summary.join('\n')}`;
+}
+
+// ---------------------------------------------------------------------------
+// Grok (xAI) backend — OpenAI-compatible REST API with function calling
+// ---------------------------------------------------------------------------
+
+interface XaiMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content?: string | null;
+  tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>;
+  tool_call_id?: string;
+}
+
+interface XaiChoice {
+  finish_reason: string;
+  message: XaiMessage;
+}
+
+interface XaiResponse {
+  choices: XaiChoice[];
+}
+
+async function xaiChat(apiKey: string, model: string, messages: XaiMessage[], tools: object[]): Promise<XaiResponse> {
+  const resp = await fetch('https://api.x.ai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({ model, messages, tools }),
+  });
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`xAI API error ${resp.status}: ${body.slice(0, 500)}`);
+  }
+  return await resp.json() as XaiResponse;
+}
+
+async function runGrokBackend(containerInput: ContainerInput, initialPrompt: string): Promise<void> {
+  const apiKey = (containerInput.secrets as Record<string, string> | undefined)?.XAI_API_KEY;
+  if (!apiKey) {
+    writeOutput({ status: 'error', result: null, error: 'No XAI_API_KEY available' });
+    return;
+  }
+
+  // Inject tool credentials into process.env so Bash subprocesses can use them
+  for (const key of TOOL_CREDENTIAL_VARS) {
+    const value = (containerInput.secrets as Record<string, string> | undefined)?.[key];
+    if (value) {
+      process.env[key] = value;
+      if (key === 'GITHUB_TOKEN') process.env['GH_TOKEN'] = value;
+    }
+  }
+
+  log('Starting Grok (grok-4-1-fast-reasoning) backend...');
+
+  const MODEL = 'grok-4-1-fast-reasoning';
+
+  const tools = [
+    {
+      type: 'function',
+      function: {
+        name: 'bash',
+        description: 'Run a bash command in the workspace',
+        parameters: {
+          type: 'object',
+          properties: { command: { type: 'string', description: 'Shell command to run' } },
+          required: ['command'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'send_message',
+        description: 'Send a message back to the user immediately',
+        parameters: {
+          type: 'object',
+          properties: { text: { type: 'string', description: 'Message text to send' } },
+          required: ['text'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'read_file',
+        description: 'Read a file from the workspace',
+        parameters: {
+          type: 'object',
+          properties: { path: { type: 'string', description: 'Absolute file path' } },
+          required: ['path'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'write_file',
+        description: 'Write content to a file in the workspace',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Absolute file path' },
+            content: { type: 'string', description: 'File content' },
+          },
+          required: ['path', 'content'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'send_photo',
+        description: 'Send an image/screenshot file to the user. The file must already exist on disk.',
+        parameters: {
+          type: 'object',
+          properties: {
+            file_path: { type: 'string', description: 'Absolute path to the image file to send' },
+            caption: { type: 'string', description: 'Optional caption for the photo' },
+          },
+          required: ['file_path'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'parallel_generate',
+        description: 'Generate multiple files in PARALLEL using independent LLM calls. ~3x faster than generating one at a time. Use this when you need to create multiple HTML files, design options, or any independent content simultaneously. Each task gets its own LLM call running concurrently.',
+        parameters: {
+          type: 'object',
+          properties: {
+            tasks: {
+              type: 'array',
+              description: 'Array of generation tasks to run in parallel',
+              items: {
+                type: 'object',
+                properties: {
+                  prompt: { type: 'string', description: 'The full prompt describing what to generate (e.g. "Generate a complete HTML homepage for GORJAZZ band with minimal/editorial style...")' },
+                  output_path: { type: 'string', description: 'Absolute file path to write the generated content to' },
+                },
+                required: ['prompt', 'output_path'],
+              },
+            },
+          },
+          required: ['tasks'],
+        },
+      },
+    },
+  ];
+
+  // Read system prompt
+  let systemInstruction = 'You are a helpful AI assistant. You have access to bash, file operations, and can send messages and photos back to the user.';
+  for (const name of ['CLAUDE.md', 'GEMINI.md']) {
+    const p = `/workspace/group/${name}`;
+    if (fs.existsSync(p)) { systemInstruction = fs.readFileSync(p, 'utf-8'); break; }
+  }
+
+  // Append tool name mapping
+  systemInstruction += `\n\n## Tool Name Mapping (IMPORTANT)
+When the instructions above mention \`mcp__nanoclaw__send_message\`, use the \`send_message\` tool instead.
+When they mention \`mcp__nanoclaw__send_photo\`, use the \`send_photo\` tool instead.
+To take a screenshot, use \`bash\` with agent-browser commands. Example:
+\`\`\`
+agent-browser open file:///tmp/mypage/index.html
+agent-browser wait --load networkidle
+agent-browser screenshot /tmp/mypage-preview.png --full
+\`\`\`
+Then send the screenshot with the \`send_photo\` tool.
+NEVER skip the screenshot step — users must SEE visual previews, not just read descriptions.
+`;
+
+  let chatHistory = loadGrokHistory(containerInput.chatJid);
+  // Keep only last 20 history entries to avoid growing context and slowing API calls
+  if (chatHistory.length > 20) chatHistory = chatHistory.slice(-20);
+  log(`Loaded ${chatHistory.length} Grok history entries`);
+
+  const MAX_TURNS = 15;
+  let humanPrompt = initialPrompt;
+
+  // Build messages array from history + system prompt
+  function buildMessages(userMsg: string): XaiMessage[] {
+    const msgs: XaiMessage[] = [
+      { role: 'system', content: systemInstruction },
+    ];
+    for (const entry of chatHistory) {
+      msgs.push({ role: entry.role as 'user' | 'assistant', content: entry.content });
+    }
+    msgs.push({ role: 'user', content: userMsg });
+    return msgs;
+  }
+
+  // Execute a tool call and return the result string
+  function executeTool(name: string, argsStr: string): { result: string; isSend: boolean } {
+    let result = '';
+    let isSend = false;
+    try {
+      const args = JSON.parse(argsStr);
+      if (name === 'bash') {
+        result = execSync(args.command, { cwd: '/workspace/group', shell: '/bin/bash', timeout: 120_000, maxBuffer: 2 * 1024 * 1024 }).toString();
+      } else if (name === 'send_message') {
+        const ipcFile = `/workspace/ipc/messages/grok_${Date.now()}.json`;
+        fs.writeFileSync(ipcFile, JSON.stringify({ type: 'message', chatJid: containerInput.chatJid, text: args.text }));
+        result = 'Message sent';
+        isSend = true;
+      } else if (name === 'read_file') {
+        result = fs.existsSync(args.path) ? fs.readFileSync(args.path, 'utf-8') : 'File not found';
+      } else if (name === 'write_file') {
+        fs.mkdirSync(path.dirname(args.path), { recursive: true });
+        fs.writeFileSync(args.path, args.content);
+        result = 'File written';
+      } else if (name === 'send_photo') {
+        const srcPath = args.file_path;
+        if (!fs.existsSync(srcPath)) {
+          result = `File not found: ${srcPath}`;
+        } else {
+          const ext = path.extname(srcPath) || '.png';
+          const mediaDir = '/workspace/ipc/media';
+          fs.mkdirSync(mediaDir, { recursive: true });
+          const mediaFile = `photo_${Date.now()}${ext}`;
+          fs.copyFileSync(srcPath, path.join(mediaDir, mediaFile));
+          const ipcFile = `/workspace/ipc/messages/photo_${Date.now()}.json`;
+          fs.writeFileSync(ipcFile, JSON.stringify({
+            type: 'photo',
+            chatJid: containerInput.chatJid,
+            mediaFile,
+            caption: args.caption || '',
+          }));
+          result = `Photo queued for delivery: ${mediaFile}`;
+          isSend = true;
+        }
+      } else if (name === 'parallel_generate') {
+        // This is async — handled separately below
+        result = '__PARALLEL_GENERATE__';
+      }
+    } catch (err) {
+      result = `Error: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    return { result: result.slice(0, 8000), isSend };
+  }
+
+  // Async tool executor for parallel_generate (can't use execSync)
+  async function executeToolAsync(name: string, argsStr: string): Promise<{ result: string; isSend: boolean }> {
+    if (name === 'parallel_generate') {
+      try {
+        const args = JSON.parse(argsStr);
+        const xaiKey = (containerInput.secrets as Record<string, string> | undefined)?.XAI_API_KEY;
+        const geminiKey = (containerInput.secrets as Record<string, string> | undefined)?.GEMINI_API_KEY;
+        const backend = geminiKey ? 'gemini' : 'grok';
+        const key = geminiKey || '';
+        const result = await parallelGenerate(args.tasks, key, backend, xaiKey);
+        return { result, isSend: false };
+      } catch (err) {
+        return { result: `Error: ${err instanceof Error ? err.message : String(err)}`, isSend: false };
+      }
+    }
+    return executeTool(name, argsStr);
+  }
+
+  // Single-turn mode
+  if (containerInput.singleTurn) {
+    log('Single-turn Grok mode — no conversation loop');
+    const messages = buildMessages(initialPrompt);
+    for (let turn = 0; turn < MAX_TURNS; turn++) {
+      let resp: XaiResponse;
+      try {
+        resp = await xaiChat(apiKey, MODEL, messages, tools);
+      } catch (err) {
+        writeOutput({ status: 'error', result: null, error: `Grok error: ${err instanceof Error ? err.message : String(err)}` });
+        return;
+      }
+      const choice = resp.choices[0];
+      if ((choice.finish_reason === 'tool_calls' || choice.message.tool_calls?.length) && choice.message.tool_calls) {
+        messages.push(choice.message);
+        for (const tc of choice.message.tool_calls) {
+          const { result } = await executeToolAsync(tc.function.name, tc.function.arguments);
+          messages.push({ role: 'tool', tool_call_id: tc.id, content: result });
+        }
+        continue;
+      }
+      writeOutput({ status: 'success', result: choice.message.content || null });
+      return;
+    }
+    writeOutput({ status: 'success', result: 'Done' });
+    return;
+  }
+
+  // Multi-turn conversation loop
+  conversationLoop: while (true) {
+    let gotFinalAnswer = false;
+    let usedSendMessage = false;
+    const messages = buildMessages(humanPrompt);
+
+    for (let turn = 0; turn < MAX_TURNS; turn++) {
+      let resp: XaiResponse;
+      try {
+        resp = await xaiChat(apiKey, MODEL, messages, tools);
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        writeOutput({ status: 'error', result: null, error: `Grok error: ${errMsg}` });
+        return;
+      }
+
+      const choice = resp.choices[0];
+
+      if ((choice.finish_reason === 'tool_calls' || choice.message.tool_calls?.length) && choice.message.tool_calls) {
+        messages.push(choice.message);
+        for (const tc of choice.message.tool_calls) {
+          const { result, isSend } = await executeToolAsync(tc.function.name, tc.function.arguments);
+          if (isSend) usedSendMessage = true;
+          messages.push({ role: 'tool', tool_call_id: tc.id, content: result });
+        }
+
+        if (shouldClose()) break conversationLoop;
+        const ipcMessages = drainIpcInput();
+        if (ipcMessages.length > 0) {
+          messages.push({ role: 'user', content: ipcMessages.join('\n') });
+        }
+        continue;
+      }
+
+      // Final text response
+      const text = choice.message.content || '';
+
+      let finalResult: string | null;
+      if (usedSendMessage) {
+        finalResult = null;
+        log('Suppressing final text — agent already sent via send_message/send_photo');
+      } else {
+        finalResult = text || null;
+      }
+
+      chatHistory.push({ role: 'user', content: humanPrompt });
+      chatHistory.push({ role: 'assistant', content: text || '(completed)' });
+      saveGrokHistory(containerInput.chatJid, chatHistory);
+
+      writeOutput({ status: 'success', result: finalResult });
+      gotFinalAnswer = true;
+      break;
+    } // end tool-use loop
+
+    if (!gotFinalAnswer) {
+      // Hit MAX_TURNS — save history so context is preserved for next message
+      chatHistory.push({ role: 'user', content: humanPrompt });
+      chatHistory.push({ role: 'assistant', content: '(completed)' });
+      saveGrokHistory(containerInput.chatJid, chatHistory);
+      writeOutput({ status: 'success', result: null });
+      break;
+    }
+
+    // Signal idle
+    writeOutput({ status: 'success', result: null });
+
+    if (shouldClose()) break;
+
+    log('Grok: waiting for next IPC message...');
+    const nextMessage = await waitForIpcMessage();
+    if (nextMessage === null) {
+      log('Grok: close sentinel received, exiting');
+      break;
+    }
+
+    log(`Grok: got new message (${nextMessage.length} chars), continuing`);
+    humanPrompt = nextMessage;
+  } // end conversationLoop
 }
 
 // ---------------------------------------------------------------------------
@@ -818,6 +1307,28 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
         required: ['file_path'],
       },
     },
+    {
+      name: 'parallel_generate',
+      description: 'Generate multiple files in PARALLEL using independent LLM calls. ~3x faster than generating one at a time. Use this when you need to create multiple HTML files, design options, or any independent content simultaneously.',
+      parameters: {
+        type: 'object',
+        properties: {
+          tasks: {
+            type: 'array',
+            description: 'Array of generation tasks to run in parallel',
+            items: {
+              type: 'object',
+              properties: {
+                prompt: { type: 'string', description: 'The full prompt describing what to generate' },
+                output_path: { type: 'string', description: 'Absolute file path to write the generated content to' },
+              },
+              required: ['prompt', 'output_path'],
+            },
+          },
+        },
+        required: ['tasks'],
+      },
+    },
   ];
 
   // Read system prompt from CLAUDE.md (primary for both backends) with GEMINI.md as an optional override.
@@ -827,6 +1338,22 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
     const p = `/workspace/group/${name}`;
     if (fs.existsSync(p)) { systemInstruction = fs.readFileSync(p, 'utf-8'); break; }
   }
+
+  // Append Gemini-specific tool name mapping so the model uses the correct tool names.
+  // The CLAUDE.md references mcp__nanoclaw__send_message / mcp__nanoclaw__send_photo
+  // but the Gemini runtime exposes these as send_message / send_photo.
+  systemInstruction += `\n\n## Tool Name Mapping (IMPORTANT)
+When the instructions above mention \`mcp__nanoclaw__send_message\`, use the \`send_message\` tool instead.
+When they mention \`mcp__nanoclaw__send_photo\`, use the \`send_photo\` tool instead.
+To take a screenshot, use \`bash\` with agent-browser commands. Example:
+\`\`\`
+agent-browser open file:///tmp/mypage/index.html
+agent-browser wait --load networkidle
+agent-browser screenshot /tmp/mypage-preview.png --full
+\`\`\`
+Then send the screenshot with the \`send_photo\` tool.
+NEVER skip the screenshot step — users must SEE visual previews, not just read descriptions.
+`;
 
   // Load persistent conversation history so the bot remembers prior messages
   const chatHistory = loadGeminiHistory(containerInput.chatJid);
@@ -894,7 +1421,7 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
   }
 
   const MAX_TURNS = 30;
-  const CONTEXT_RESET_TURNS = 8; // Recreate chat periodically to prevent context window overflow
+  const CONTEXT_RESET_TURNS = 20; // Recreate chat periodically to prevent context window overflow
   let turnsSinceReset = 0;
 
   // Single-turn containers (media analysis, summarization) skip the conversation loop entirely.
@@ -914,7 +1441,7 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
       // @ts-ignore
       const fnCalls: Array<{ name: string; args: Record<string, unknown>; id?: string }> = (resp as any).functionCalls ?? [];
       if (!fnCalls.length) {
-        writeOutput({ status: 'success', result: text || '(no response)' });
+        writeOutput({ status: 'success', result: text || null });
         return;
       }
       const fnResponses: object[] = [];
@@ -923,7 +1450,7 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
         try {
           const args = fn.args as Record<string, string>;
           if (fn.name === 'bash') {
-            result = execSync(args.command, { cwd: '/workspace/group', timeout: 30000 }).toString();
+            result = execSync(args.command, { cwd: '/workspace/group', shell: '/bin/bash', timeout: 120_000, maxBuffer: 2 * 1024 * 1024 }).toString();
           } else if (fn.name === 'read_file') {
             result = fs.existsSync(args.path) ? fs.readFileSync(args.path, 'utf-8') : 'File not found';
           } else if (fn.name === 'write_file') {
@@ -947,6 +1474,12 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
   // can hold a multi-turn conversation without losing history.
   conversationLoop: while (true) {
   let gotFinalAnswer = false;
+  let usedSendMessage = false;  // Track whether send_message/send_photo was used during tool calls
+  let sendMessageCount = 0;     // Hard cap on send_message calls per conversation turn
+  const MAX_SEND_MESSAGES = 1;  // Max text messages per turn (photos don't count)
+  let consecutiveNudges = 0;    // Track consecutive <internal>-only responses to prevent infinite nudge loops
+  const MAX_CONSECUTIVE_NUDGES = 2;
+  let pendingIpcForNextTurn: string[] = [];  // IPC messages consumed during tool loop, saved for next conversation turn
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     // Proactively recreate chat to prevent context window from filling up
@@ -986,33 +1519,81 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
     }
 
     // Extract text
-    const text: string = (resp as any).text ?? '';
+    let text: string = (resp as any).text ?? '';
     // @ts-ignore
     const fnCalls: Array<{ name: string; args: Record<string, unknown>; id?: string }> = (resp as any).functionCalls ?? [];
 
+    // Strip <internal>...</internal> thinking tags — these are model self-talk, not user content
+    const strippedText = text.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+
     if (!fnCalls.length) {
-      // Save this exchange to persistent history
+      // If the model only output <internal> tags (no real content, no tool calls),
+      // it's hallucinating actions instead of taking them.  Nudge it to actually act.
+      if (!strippedText && text.includes('<internal>')) {
+        consecutiveNudges++;
+        if (consecutiveNudges <= MAX_CONSECUTIVE_NUDGES) {
+          log(`Model returned only <internal> tags with no tool calls — nudging to take action (${consecutiveNudges}/${MAX_CONSECUTIVE_NUDGES})`);
+          userMessage = 'You just produced internal thinking but did NOT actually call any tools or send any message. You MUST use the send_message tool to communicate with the user. For simple messages like greetings, just call send_message directly with a friendly response — no tools needed. Take action NOW.';
+          continue;
+        }
+        // Exhausted nudge attempts — extract whatever text was in the internal tags
+        // and use it as the final response rather than looping forever.
+        log(`Max consecutive nudges reached (${MAX_CONSECUTIVE_NUDGES}), extracting internal text as response`);
+        const internalMatch = text.match(/<internal>([\s\S]*?)<\/internal>/);
+        const fallbackText = internalMatch ? internalMatch[1].trim() : 'Hi! How can I help you?';
+        text = fallbackText;
+      } else {
+        consecutiveNudges = 0; // Reset on successful non-internal output
+      }
+
+      // Determine what to send as the final output.
+      // If send_message/send_photo was already used during tool calls,
+      // the user has already received the response via IPC.  Sending the
+      // final text again would cause a visible duplicate.  Strip it or
+      // use null so the streaming callback in the host skips it.
+      let finalResult: string | null;
+      if (usedSendMessage) {
+        // Agent already communicated via IPC — suppress final text to prevent dupes.
+        // Save the full model text to history so context isn't lost.
+        finalResult = null;
+        log('Suppressing final text output — agent already sent via send_message/send_photo');
+      } else {
+        // Use strippedText (normal case) or fall back to text which may have been
+        // set from extracted <internal> content after exhausting nudge attempts.
+        finalResult = strippedText || text || null;
+      }
+
+      // Save this exchange to persistent history (use stripped text to avoid poisoning history)
+      const historyText = strippedText || text || '(completed)';
       chatHistory.push({ role: 'user', parts: [{ text: humanPrompt }] });
-      chatHistory.push({ role: 'model', parts: [{ text: text || '(no response)' }] });
+      chatHistory.push({ role: 'model', parts: [{ text: historyText }] });
       saveGeminiHistory(containerInput.chatJid, chatHistory);
 
-      writeOutput({ status: 'success', result: text || '(no response)' });
+      writeOutput({ status: 'success', result: finalResult });
       gotFinalAnswer = true;
       break;
     }
 
     // Execute tool calls
+    consecutiveNudges = 0; // Model is taking action, reset nudge counter
     const fnResponses: object[] = [];
     for (const fn of fnCalls) {
       let result = '';
       try {
         const args = fn.args as Record<string, string>;
         if (fn.name === 'bash') {
-          result = execSync(args.command, { cwd: '/workspace/group', timeout: 30000 }).toString();
+          result = execSync(args.command, { cwd: '/workspace/group', shell: '/bin/bash', timeout: 120_000, maxBuffer: 2 * 1024 * 1024 }).toString();
         } else if (fn.name === 'send_message') {
-          const ipcFile = `/workspace/ipc/messages/gemini_${Date.now()}.json`;
-          fs.writeFileSync(ipcFile, JSON.stringify({ type: 'message', chatJid: containerInput.chatJid, text: args.text }));
-          result = 'Message sent';
+          if (sendMessageCount >= MAX_SEND_MESSAGES) {
+            result = `Message suppressed — you have already sent ${MAX_SEND_MESSAGES} messages this turn. Combine your text into fewer, longer messages instead of many short ones.`;
+            log(`send_message suppressed (${sendMessageCount}/${MAX_SEND_MESSAGES} cap reached)`);
+          } else {
+            const ipcFile = `/workspace/ipc/messages/gemini_${Date.now()}.json`;
+            fs.writeFileSync(ipcFile, JSON.stringify({ type: 'message', chatJid: containerInput.chatJid, text: args.text }));
+            result = 'Message sent';
+            sendMessageCount++;
+            usedSendMessage = true;
+          }
         } else if (fn.name === 'read_file') {
           result = fs.existsSync(args.path) ? fs.readFileSync(args.path, 'utf-8') : 'File not found';
         } else if (fn.name === 'write_file') {
@@ -1037,7 +1618,14 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
               caption: args.caption || '',
             }));
             result = `Photo queued for delivery: ${mediaFile}`;
+            usedSendMessage = true;
           }
+        } else if (fn.name === 'parallel_generate') {
+          const geminiKey = (containerInput.secrets as Record<string, string> | undefined)?.GEMINI_API_KEY;
+          const xaiKey = (containerInput.secrets as Record<string, string> | undefined)?.XAI_API_KEY;
+          const backend = geminiKey ? 'gemini' : 'grok';
+          const key = geminiKey || '';
+          result = await parallelGenerate((fn.args as any).tasks, key, backend, xaiKey);
         }
       } catch (err) {
         result = `Error: ${err instanceof Error ? err.message : String(err)}`;
@@ -1050,16 +1638,56 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
     if (shouldClose()) break conversationLoop;
     const ipcMessages = drainIpcInput();
     if (ipcMessages.length > 0) {
-      // Append IPC messages as extra user text alongside tool results
-      fnResponses.push({ text: ipcMessages.join('\n') } as object);
+      // New user input arrived while the model was processing its current task.
+      // DON'T append to fnResponses — that mixes them with tool results and the
+      // model may ignore them.  Instead, save for a dedicated conversation turn
+      // after the current turn completes.  This ensures the model gives a proper
+      // response to follow-up messages (e.g. a design request sent while the
+      // greeting was being generated).
+      pendingIpcForNextTurn.push(...ipcMessages);
+      log(`Saved ${ipcMessages.length} IPC message(s) for next conversation turn (${pendingIpcForNextTurn.length} total pending)`);
     }
     userMessage = fnResponses;
   } // end tool-use loop
 
   if (!gotFinalAnswer) {
     // Hit MAX_TURNS without a natural conclusion
+    if (pendingIpcForNextTurn.length > 0 && !shouldClose()) {
+      // There are piped user messages that haven't been addressed yet.
+      // Instead of exiting, start a new conversation turn for them.
+      log(`MAX_TURNS reached but ${pendingIpcForNextTurn.length} pending IPC message(s) — starting new conversation turn`);
+      writeOutput({ status: 'success', result: null });
+      humanPrompt = pendingIpcForNextTurn.join('\n');
+      userMessage = humanPrompt;
+      chatHistory.push({ role: 'user', parts: [{ text: humanPrompt }] });
+      chatHistory.push({ role: 'model', parts: [{ text: '(completed previous task)' }] });
+      saveGeminiHistory(containerInput.chatJid, chatHistory);
+      chat = createChat();
+      turnsSinceReset = 0;
+      continue conversationLoop;
+    }
     writeOutput({ status: 'success', result: 'Done' });
     break;
+  }
+
+  // If IPC messages arrived during the tool loop, process them immediately
+  // as a new conversation turn instead of waiting in waitForIpcMessage.
+  // Also drain any IPC messages that arrived after the last tool call.
+  const finalDrainMessages = drainIpcInput();
+  if (finalDrainMessages.length > 0) {
+    pendingIpcForNextTurn.push(...finalDrainMessages);
+  }
+
+  if (pendingIpcForNextTurn.length > 0 && !shouldClose()) {
+    log(`Current turn complete, ${pendingIpcForNextTurn.length} pending IPC message(s) — starting new conversation turn immediately`);
+    // Signal current turn done
+    writeOutput({ status: 'success', result: null });
+    humanPrompt = pendingIpcForNextTurn.join('\n');
+    userMessage = humanPrompt;
+    // Reset counters for the new turn
+    chat = createChat();
+    turnsSinceReset = 0;
+    continue conversationLoop;
   }
 
   // Signal host that we are idle and ready for the next message

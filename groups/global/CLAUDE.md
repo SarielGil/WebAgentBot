@@ -119,13 +119,15 @@ When working as a sub-agent, only use `send_message` if instructed by the main a
 
 ## Message Formatting
 
-NEVER use markdown. Only WhatsApp/Telegram formatting:
-- *bold* with single asterisks (NEVER **double**)
-- _italic_ with underscores
-- • bullet points
-- ```code blocks``` with triple backticks
+The channel uses Telegram HTML mode. Use HTML tags — NOT markdown:
+- <b>bold</b> (never *asterisks*)
+- <i>italic</i> (never _underscores_)
+- <code>inline code</code>
+- <pre>code block</pre>
+- • bullet points (plain text)
 
-No ## headings. No [links](url). No **double stars**.
+Escape these characters in plain text: & → &amp;   < → &lt;   > → &gt;
+No ## headings. No [markdown links](url). No raw angle brackets in text.
 
 ## Workspace & Memory
 
@@ -138,26 +140,43 @@ When learning something important:
 
 ## Website Project Protocol (All Bots)
 
-For any new website project, follow this order:
-1. Create/update roadmap first at `/workspace/group/projects/<slug>/README.md` (short and lightweight).
-2. Generate 3 clearly different mockup options before full build.
-3. Screenshot all 3 options and send them with `mcp__nanoclaw__send_photo`.
-4. Ask user to choose option 1/2/3.
-5. Only after choice: build full site, deploy, and update roadmap checklist.
+Website builds use a **3-bot agent swarm**. Each bot has a fixed role:
 
-Variation requirements for the 3 options:
-- Option 1: minimal/editorial
-- Option 2: bold/high-contrast
-- Option 3: warm/human
+### Role: Copywriter
+- Write all site text and save to `/workspace/group/<slug>/content.md`
+- Sections: hero headline + subheadline + CTA, services (name + description + benefit), about (3–4 sentences), social proof placeholders, contact copy, footer tagline
+- Send progress via `mcp__nanoclaw__send_message` with `sender: "Copywriter"`
 
-Do not send near-identical variants. Change layout structure, typography, and color system between options.
-If user photos exist, every preview set must visibly use real uploaded photos in the actual mockups — not just later in the final build.
-When deriving colors from the same photos, create 3 different interpretations of the palette rather than 3 near-identical shades of the same scheme.
+### Role: Designer
+- Build 3 distinct HTML/CSS homepage mockups using copy from `/workspace/group/<slug>/content.md`
+- Option 1: minimal/editorial · Option 2: bold/high-contrast · Option 3: warm/human
+- Each option must differ in layout structure, typography, spacing, and color system — no near-duplicates
+- If user photos exist at `/workspace/media/`, embed them visibly in every option
+- NO icon libraries (Font Awesome, Material Icons, etc.) — use CSS shapes, typography, and spacing instead
+- Screenshot all 3, send via `mcp__nanoclaw__send_photo`, ask user to pick 1/2/3
+- After pick: build complete multi-page site in `/workspace/group/<slug>/`
+- Send progress via `mcp__nanoclaw__send_message` with `sender: "Designer"`
 
-Roadmap priority:
-- Conversation context and latest user instruction are the source of truth.
-- Roadmap is a tracking artifact, not a replacement for user intent.
-- If roadmap conflicts with current user request, follow the current user request and then update roadmap.
+### Role: SEO Architect
+- Produce all SEO/structural files in `/workspace/group/<slug>/seo/`:
+  - `sitemap.xml` — `<loc>` for every page
+  - `robots.txt` — allow all, Sitemap pointer
+  - `seo-meta.html` — `<title>`, `<meta description>`, canonical, OG tags, Twitter card
+  - `jsonld.json` — JSON-LD LocalBusiness (or relevant schema)
+  - `seo-checklist.md` — what's done, what needs real data (address, phone, etc.)
+- After Designer builds the full site: inject SEO tags into every page `<head>` and place sitemap + robots.txt in root
+- Send progress via `mcp__nanoclaw__send_message` with `sender: "SEO Architect"`
+
+### Shared rules for all website bots
+- Read `/workspace/group/<slug>/content.md` before building — use the real copy
+- Save all output to `/workspace/group/<slug>/` so all bots and lead can access it
+- Keep group messages short (2–4 sentences). Use Telegram HTML: `<b>bold</b>`, `<i>italic</i>`, • bullets. No markdown
+- Pre-deploy validation: `index.html` must exist in root — stop and fix if missing
+
+### Roadmap priority
+- Conversation context and latest user instruction are the source of truth
+- Roadmap is a tracking artifact, not a replacement for user intent
+- If roadmap conflicts with current user request, follow the current user request and then update roadmap
 
 ## Redesign Mode Rules (Critical)
 

@@ -18,6 +18,14 @@ interface GroupState {
   active: boolean;
   idleWaiting: boolean;
   isTaskContainer: boolean;
+  /**
+   * True while the group is in a preparation phase (media analysis,
+   * summarization) where piped IPC messages would be consumed by a
+   * singleTurn container and silently lost.  sendMessage() returns
+   * false when this flag is set, so new messages are queued for the
+   * next full processing cycle instead.
+   */
+  preparing: boolean;
   pendingMessages: boolean;
   pendingTasks: QueuedTask[];
   process: ChildProcess | null;
@@ -33,6 +41,20 @@ export class GroupQueue {
   private processMessagesFn: ((groupJid: string) => Promise<boolean>) | null =
     null;
   private shuttingDown = false;
+  /**
+   * Per-group callbacks invoked whenever sendMessage successfully pipes
+   * a message to the running container.  processGroupMessages uses this
+   * to reset its idle timer so _close doesn't fire prematurely.
+   */
+  private messagePipedCallbacks = new Map<string, () => void>();
+  /**
+   * Per-group flag indicating that the IPC watcher delivered at least one
+   * outbound message (send_message/send_photo) to the user on behalf of
+   * this group's active container.  Used by processGroupMessages to avoid
+   * rolling back the message cursor on container crash — the user already
+   * received output.
+   */
+  private ipcOutputSent = new Map<string, boolean>();
 
   private getGroup(groupJid: string): GroupState {
     let state = this.groups.get(groupJid);
@@ -41,6 +63,7 @@ export class GroupQueue {
         active: false,
         idleWaiting: false,
         isTaskContainer: false,
+        preparing: false,
         pendingMessages: false,
         pendingTasks: [],
         process: null,
@@ -148,12 +171,63 @@ export class GroupQueue {
   }
 
   /**
+   * Register a callback that fires whenever sendMessage() successfully
+   * pipes a message to the container for this group.  Used by
+   * processGroupMessages to reset its idle timer.
+   */
+  setOnMessagePiped(groupJid: string, callback: () => void): void {
+    this.messagePipedCallbacks.set(groupJid, callback);
+  }
+
+  /**
+   * Remove the onMessagePiped callback for a group.
+   */
+  clearOnMessagePiped(groupJid: string): void {
+    this.messagePipedCallbacks.delete(groupJid);
+  }
+
+  /**
+   * Signal that the main (multi-turn) agent container is about to start.
+   * Clears the preparing flag so that sendMessage() will accept piped messages.
+   */
+  markReady(groupJid: string): void {
+    const state = this.getGroup(groupJid);
+    state.preparing = false;
+  }
+
+  /**
+   * Record that the IPC watcher delivered outbound content to the user
+   * on behalf of this group's active container.
+   */
+  markIpcOutputSent(groupJid: string): void {
+    this.ipcOutputSent.set(groupJid, true);
+  }
+
+  /**
+   * Check whether the IPC watcher delivered any outbound content to the
+   * user during the current container run for this group.
+   */
+  hasIpcOutputSent(groupJid: string): boolean {
+    return this.ipcOutputSent.get(groupJid) ?? false;
+  }
+
+  /**
+   * Clear the IPC output tracking flag for a group (called when the
+   * container run completes).
+   */
+  clearIpcOutputSent(groupJid: string): void {
+    this.ipcOutputSent.delete(groupJid);
+  }
+
+  /**
    * Send a follow-up message to the active container via IPC file.
-   * Returns true if the message was written, false if no active container.
+   * Returns true if the message was written, false if no active container
+   * or if the group is still in a preparation phase (media analysis /
+   * summarization) where piped messages would be lost.
    */
   sendMessage(groupJid: string, text: string): boolean {
     const state = this.getGroup(groupJid);
-    if (!state.active || !state.groupFolder || state.isTaskContainer)
+    if (!state.active || !state.groupFolder || state.isTaskContainer || state.preparing)
       return false;
     state.idleWaiting = false; // Agent is about to receive work, no longer idle
 
@@ -165,6 +239,9 @@ export class GroupQueue {
       const tempPath = `${filepath}.tmp`;
       fs.writeFileSync(tempPath, JSON.stringify({ type: 'message', text }));
       fs.renameSync(tempPath, filepath);
+      // Notify the host so it can reset its idle timer — piped messages
+      // mean the agent is about to do work and _close should be deferred.
+      this.messagePipedCallbacks.get(groupJid)?.();
       return true;
     } catch {
       return false;
@@ -195,6 +272,7 @@ export class GroupQueue {
     state.active = true;
     state.idleWaiting = false;
     state.isTaskContainer = false;
+    state.preparing = true;
     state.pendingMessages = false;
     this.activeCount++;
 
@@ -216,6 +294,34 @@ export class GroupQueue {
       logger.error({ groupJid, err }, 'Error processing messages for group');
       this.scheduleRetry(groupJid, state);
     } finally {
+      // Check for orphaned IPC input files — messages that were piped
+      // but never consumed by the container.  If found, force a
+      // reprocessing cycle so they aren't silently lost.
+      if (state.groupFolder) {
+        const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
+        try {
+          const orphans = fs
+            .readdirSync(inputDir)
+            .filter((f) => f.endsWith('.json'));
+          if (orphans.length > 0) {
+            state.pendingMessages = true;
+            for (const f of orphans) {
+              try {
+                fs.unlinkSync(path.join(inputDir, f));
+              } catch {
+                /* ignore */
+              }
+            }
+            logger.warn(
+              { groupJid, orphanedCount: orphans.length },
+              'Found orphaned IPC input files after container exit, scheduling reprocessing',
+            );
+          }
+        } catch {
+          /* input dir may not exist */
+        }
+      }
+      this.messagePipedCallbacks.delete(groupJid);
       state.active = false;
       state.process = null;
       state.containerName = null;

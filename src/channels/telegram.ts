@@ -1,4 +1,4 @@
-import { Bot, InputFile } from 'grammy';
+import { Api, Bot, InputFile } from 'grammy';
 import { ASSISTANT_NAME } from '../config.js';
 import { logger } from '../logger.js';
 import {
@@ -13,6 +13,89 @@ import https from 'https';
 import fs from 'fs';
 import path from 'path';
 import { pipeline } from 'stream/promises';
+
+// ---------------------------------------------------------------------------
+// Agent Swarm — module-level bot pool (send-only Api instances, no polling)
+// ---------------------------------------------------------------------------
+
+const poolApis: Api[] = [];
+/** Maps "{groupFolder}:{senderName}" → pool Api index for stable per-group assignment. */
+const senderBotMap = new Map<string, number>();
+let nextPoolIndex = 0;
+
+/**
+ * Initialize send-only Api instances for the bot pool.
+ * Call once on startup after reading TELEGRAM_BOT_POOL.
+ */
+export async function initBotPool(tokens: string[]): Promise<void> {
+  for (const token of tokens) {
+    try {
+      const api = new Api(token);
+      const me = await api.getMe();
+      poolApis.push(api);
+      logger.info(
+        { username: me.username, id: me.id, poolSize: poolApis.length },
+        'Pool bot initialized',
+      );
+    } catch (err) {
+      logger.error({ err }, 'Failed to initialize pool bot');
+    }
+  }
+  if (poolApis.length > 0) {
+    logger.info({ count: poolApis.length }, 'Telegram bot pool ready');
+  }
+}
+
+/**
+ * Send a message via a pool bot assigned to the given sender name.
+ * Assigns bots round-robin on first use; subsequent messages from the
+ * same sender in the same group always use the same bot.
+ * Falls back to `fallback` if no pool bots are configured.
+ */
+export async function sendPoolMessage(
+  chatId: string,
+  text: string,
+  sender: string,
+  groupFolder: string,
+  fallback?: (jid: string, text: string) => Promise<void>,
+): Promise<void> {
+  if (poolApis.length === 0) {
+    if (fallback) await fallback(chatId, text);
+    return;
+  }
+
+  const key = `${groupFolder}:${sender}`;
+  let idx = senderBotMap.get(key);
+  if (idx === undefined) {
+    idx = nextPoolIndex % poolApis.length;
+    nextPoolIndex++;
+    senderBotMap.set(key, idx);
+    try {
+      await poolApis[idx].setMyName(sender);
+      await new Promise((r) => setTimeout(r, 2000));
+      logger.info({ sender, groupFolder, poolIndex: idx }, 'Assigned and renamed pool bot');
+    } catch (err) {
+      logger.warn({ sender, err }, 'Failed to rename pool bot (sending anyway)');
+    }
+  }
+
+  const api = poolApis[idx];
+  // Strip 'c:' prefix if present to get the raw Telegram numeric chat ID
+  const rawId = chatId.startsWith('c:') ? chatId.slice(2) : chatId;
+  const MAX_LENGTH = 4096;
+  try {
+    if (text.length <= MAX_LENGTH) {
+      await api.sendMessage(rawId, text);
+    } else {
+      for (let i = 0; i < text.length; i += MAX_LENGTH) {
+        await api.sendMessage(rawId, text.slice(i, i + MAX_LENGTH));
+      }
+    }
+    logger.info({ chatId, sender, poolIndex: idx, length: text.length }, 'Pool message sent');
+  } catch (err) {
+    logger.error({ chatId, sender, err }, 'Failed to send pool message');
+  }
+}
 
 export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
@@ -112,6 +195,17 @@ export class TelegramChannel implements Channel {
           if (!group || group.folder !== this.adminFolder) return;
         }
         // Client bot: processes all JIDs (namespaced, so no collision with admin)
+
+        // Ignore messages authored by bots, including our own send-only pool bots.
+        // Otherwise Telegram group updates can feed our outbound messages back into
+        // the router as fresh inbound user messages, causing a second round.
+        if (ctx.from?.is_bot) {
+          logger.debug(
+            { routingJid, senderId: ctx.from.id.toString() },
+            'Ignoring Telegram bot-authored message',
+          );
+          return;
+        }
 
         const senderId = ctx.from?.id.toString() || 'unknown';
         const senderName =
@@ -236,9 +330,58 @@ export class TelegramChannel implements Channel {
       if (caption) opts.caption = caption;
       await bot.api.sendPhoto(chatId, new InputFile(stream), opts as any);
       logger.info({ jid }, 'Photo sent via Telegram');
+      try { fs.unlinkSync(filePath); } catch {}
     } catch (err) {
       this.enqueueOutgoing({ type: 'photo', jid, filePath, caption });
       logger.warn({ err, jid, filePath }, 'Failed to send Telegram photo');
+    }
+  }
+
+  /**
+   * Send multiple photos as a Telegram media group (album).
+   * Photos appear bundled together in the chat instead of as separate messages.
+   */
+  async sendMediaGroup(
+    jid: string,
+    photos: Array<{ filePath: string; caption?: string }>,
+  ): Promise<void> {
+    if (photos.length === 0) return;
+    // Fall back to single sendPhoto for 1 photo
+    if (photos.length === 1) {
+      return this.sendPhoto(jid, photos[0].filePath, photos[0].caption);
+    }
+    if (!this.connected) {
+      // Fall back to individual queuing
+      for (const p of photos) {
+        this.enqueueOutgoing({ type: 'photo', jid, filePath: p.filePath, caption: p.caption });
+      }
+      return;
+    }
+    const bot = this.botForJid(jid);
+    const chatId = this.rawChatId(jid);
+    try {
+      const media = photos.map((p, i) => {
+        const stream = fs.createReadStream(p.filePath);
+        const item: Record<string, unknown> = {
+          type: 'photo',
+          media: new InputFile(stream),
+        };
+        if (p.caption) item.caption = p.caption;
+        return item;
+      });
+      await (bot.api as any).sendMediaGroup(chatId, media);
+      logger.info({ jid, count: photos.length }, 'Media group sent via Telegram');
+      for (const p of photos) {
+        try { fs.unlinkSync(p.filePath); } catch {}
+      }
+    } catch (err) {
+      logger.warn({ err, jid, count: photos.length }, 'Failed to send media group, falling back to individual photos');
+      // Fall back to sending individually
+      for (const p of photos) {
+        try {
+          await this.sendPhoto(jid, p.filePath, p.caption);
+        } catch {}
+      }
     }
   }
 
@@ -264,6 +407,26 @@ export class TelegramChannel implements Channel {
         try {
           await this.sendQueuedItem(item);
         } catch (err) {
+          // Detect permanent failures (e.g. file too big) — don't retry forever
+          const errMsg = err instanceof Error ? err.message : String(err);
+          if (/too big|too large|file.*size/i.test(errMsg)) {
+            logger.error(
+              { jid: item.jid, err },
+              'Permanent send failure (file too large), dropping from queue',
+            );
+            // Try to send caption as plain text so user gets some feedback
+            if (item.type === 'photo' && item.caption) {
+              try {
+                const bot = this.botForJid(item.jid);
+                const chatId = this.rawChatId(item.jid);
+                await bot.api.sendMessage(chatId, item.caption);
+              } catch {}
+            }
+            if (item.type === 'photo' && item.filePath) {
+              try { fs.unlinkSync(item.filePath); } catch {}
+            }
+            continue; // Skip to next item instead of retrying
+          }
           this.outgoingQueue.unshift(item);
           this.scheduleRetry();
           logger.warn(
@@ -315,11 +478,50 @@ export class TelegramChannel implements Channel {
       return;
     }
 
+    if (!fs.existsSync(item.filePath)) {
+      logger.warn({ filePath: item.filePath, jid: item.jid }, 'Photo file no longer exists, dropping from queue');
+      return;
+    }
+
+    // Telegram limit: photos must be <10MB. If larger, try as document; if that
+    // also fails, send just the caption as text and discard the file.
+    const TELEGRAM_PHOTO_MAX = 10 * 1024 * 1024; // 10MB
+    const fileSize = fs.statSync(item.filePath).size;
+
+    if (fileSize > TELEGRAM_PHOTO_MAX) {
+      logger.warn(
+        { jid: item.jid, filePath: item.filePath, fileSize },
+        `Photo exceeds Telegram 10MB limit (${(fileSize / 1024 / 1024).toFixed(1)}MB), sending as document`,
+      );
+      try {
+        const docStream = fs.createReadStream(item.filePath);
+        const docOpts: Record<string, unknown> = {};
+        if (item.caption) docOpts.caption = item.caption;
+        await bot.api.sendDocument(chatId, new InputFile(docStream), docOpts as any);
+        logger.info({ jid: item.jid }, 'Oversized photo sent as document');
+        try { fs.unlinkSync(item.filePath); } catch {}
+        return;
+      } catch (docErr) {
+        logger.warn(
+          { jid: item.jid, err: docErr },
+          'Failed to send oversized photo as document, sending caption only',
+        );
+        if (item.caption) {
+          try {
+            await bot.api.sendMessage(chatId, item.caption);
+          } catch {}
+        }
+        try { fs.unlinkSync(item.filePath); } catch {}
+        return; // Don't throw — this is a permanent failure, not retryable
+      }
+    }
+
     const stream = fs.createReadStream(item.filePath);
     const opts: Record<string, unknown> = {};
     if (item.caption) opts.caption = item.caption;
     await bot.api.sendPhoto(chatId, new InputFile(stream), opts as any);
     logger.info({ jid: item.jid }, 'Photo sent via Telegram');
+    try { fs.unlinkSync(item.filePath); } catch {}
   }
 
   private async downloadTelegramFile(
