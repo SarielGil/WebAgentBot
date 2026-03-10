@@ -19,12 +19,13 @@ vi.mock('pino', () => ({
 }));
 
 // Use vi.hoisted so variables are available inside vi.mock factories
-const { mockFsExistsSync, mockFsReadFileSync, mockFsRealpathSync } =
-  vi.hoisted(() => ({
+const { mockFsExistsSync, mockFsReadFileSync, mockFsRealpathSync } = vi.hoisted(
+  () => ({
     mockFsExistsSync: vi.fn(() => false) as ReturnType<typeof vi.fn>,
     mockFsReadFileSync: vi.fn(() => '{}') as ReturnType<typeof vi.fn>,
     mockFsRealpathSync: vi.fn((p: string) => p) as ReturnType<typeof vi.fn>,
-  }));
+  }),
+);
 
 vi.mock('fs', async () => {
   const actual = await vi.importActual<typeof import('fs')>('fs');
@@ -98,9 +99,7 @@ describe('mount-security', () => {
       });
       mockFsReadFileSync.mockReturnValue(
         JSON.stringify({
-          allowedRoots: [
-            { path: '/home/user/projects', allowReadWrite: true },
-          ],
+          allowedRoots: [{ path: '/home/user/projects', allowReadWrite: true }],
           blockedPatterns: [],
           nonMainReadOnly: false,
         }),
@@ -267,9 +266,7 @@ describe('mount-security', () => {
       mockFsExistsSync.mockReturnValue(true);
       mockFsReadFileSync.mockReturnValue(
         JSON.stringify({
-          allowedRoots: [
-            { path: '/home/user/projects', allowReadWrite: true },
-          ],
+          allowedRoots: [{ path: '/home/user/projects', allowReadWrite: true }],
           blockedPatterns: [],
           nonMainReadOnly: false,
         }),
@@ -290,9 +287,7 @@ describe('mount-security', () => {
       mockFsExistsSync.mockReturnValue(true);
       mockFsReadFileSync.mockReturnValue(
         JSON.stringify({
-          allowedRoots: [
-            { path: '/home/user/projects', allowReadWrite: true },
-          ],
+          allowedRoots: [{ path: '/home/user/projects', allowReadWrite: true }],
           blockedPatterns: [],
           nonMainReadOnly: false,
         }),
@@ -315,9 +310,7 @@ describe('mount-security', () => {
       mockFsExistsSync.mockReturnValue(true);
       mockFsReadFileSync.mockReturnValue(
         JSON.stringify({
-          allowedRoots: [
-            { path: '/home/user/projects', allowReadWrite: true },
-          ],
+          allowedRoots: [{ path: '/home/user/projects', allowReadWrite: true }],
           blockedPatterns: [],
           nonMainReadOnly: true,
         }),
@@ -342,9 +335,7 @@ describe('mount-security', () => {
       mockFsExistsSync.mockReturnValue(true);
       mockFsReadFileSync.mockReturnValue(
         JSON.stringify({
-          allowedRoots: [
-            { path: '/home/user/projects', allowReadWrite: true },
-          ],
+          allowedRoots: [{ path: '/home/user/projects', allowReadWrite: true }],
           blockedPatterns: [],
           nonMainReadOnly: true,
         }),
@@ -398,9 +389,7 @@ describe('mount-security', () => {
       mockFsExistsSync.mockReturnValue(true);
       mockFsReadFileSync.mockReturnValue(
         JSON.stringify({
-          allowedRoots: [
-            { path: '/home/user/projects', allowReadWrite: true },
-          ],
+          allowedRoots: [{ path: '/home/user/projects', allowReadWrite: true }],
           blockedPatterns: [],
           nonMainReadOnly: false,
         }),
@@ -429,9 +418,7 @@ describe('mount-security', () => {
       mockFsExistsSync.mockReturnValue(true);
       mockFsReadFileSync.mockReturnValue(
         JSON.stringify({
-          allowedRoots: [
-            { path: '/home/user/projects', allowReadWrite: true },
-          ],
+          allowedRoots: [{ path: '/home/user/projects', allowReadWrite: true }],
           blockedPatterns: [],
           nonMainReadOnly: false,
         }),

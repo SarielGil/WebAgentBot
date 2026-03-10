@@ -227,7 +227,12 @@ export class GroupQueue {
    */
   sendMessage(groupJid: string, text: string): boolean {
     const state = this.getGroup(groupJid);
-    if (!state.active || !state.groupFolder || state.isTaskContainer || state.preparing)
+    if (
+      !state.active ||
+      !state.groupFolder ||
+      state.isTaskContainer ||
+      state.preparing
+    )
       return false;
     state.idleWaiting = false; // Agent is about to receive work, no longer idle
 

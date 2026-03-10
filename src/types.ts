@@ -93,7 +93,10 @@ export interface Channel {
   // Optional: send a photo/image file. Channels that support it implement it.
   sendPhoto?(jid: string, filePath: string, caption?: string): Promise<void>;
   // Optional: send multiple photos as a media group (album).
-  sendMediaGroup?(jid: string, photos: Array<{ filePath: string; caption?: string }>): Promise<void>;
+  sendMediaGroup?(
+    jid: string,
+    photos: Array<{ filePath: string; caption?: string }>,
+  ): Promise<void>;
 }
 
 // Callback type that channels use to deliver inbound messages

@@ -73,9 +73,15 @@ export async function sendPoolMessage(
     try {
       await poolApis[idx].setMyName(sender);
       await new Promise((r) => setTimeout(r, 2000));
-      logger.info({ sender, groupFolder, poolIndex: idx }, 'Assigned and renamed pool bot');
+      logger.info(
+        { sender, groupFolder, poolIndex: idx },
+        'Assigned and renamed pool bot',
+      );
     } catch (err) {
-      logger.warn({ sender, err }, 'Failed to rename pool bot (sending anyway)');
+      logger.warn(
+        { sender, err },
+        'Failed to rename pool bot (sending anyway)',
+      );
     }
   }
 
@@ -91,7 +97,10 @@ export async function sendPoolMessage(
         await api.sendMessage(rawId, text.slice(i, i + MAX_LENGTH));
       }
     }
-    logger.info({ chatId, sender, poolIndex: idx, length: text.length }, 'Pool message sent');
+    logger.info(
+      { chatId, sender, poolIndex: idx, length: text.length },
+      'Pool message sent',
+    );
   } catch (err) {
     logger.error({ chatId, sender, err }, 'Failed to send pool message');
   }
@@ -330,7 +339,9 @@ export class TelegramChannel implements Channel {
       if (caption) opts.caption = caption;
       await bot.api.sendPhoto(chatId, new InputFile(stream), opts as any);
       logger.info({ jid }, 'Photo sent via Telegram');
-      try { fs.unlinkSync(filePath); } catch {}
+      try {
+        fs.unlinkSync(filePath);
+      } catch {}
     } catch (err) {
       this.enqueueOutgoing({ type: 'photo', jid, filePath, caption });
       logger.warn({ err, jid, filePath }, 'Failed to send Telegram photo');
@@ -353,7 +364,12 @@ export class TelegramChannel implements Channel {
     if (!this.connected) {
       // Fall back to individual queuing
       for (const p of photos) {
-        this.enqueueOutgoing({ type: 'photo', jid, filePath: p.filePath, caption: p.caption });
+        this.enqueueOutgoing({
+          type: 'photo',
+          jid,
+          filePath: p.filePath,
+          caption: p.caption,
+        });
       }
       return;
     }
@@ -370,12 +386,20 @@ export class TelegramChannel implements Channel {
         return item;
       });
       await (bot.api as any).sendMediaGroup(chatId, media);
-      logger.info({ jid, count: photos.length }, 'Media group sent via Telegram');
+      logger.info(
+        { jid, count: photos.length },
+        'Media group sent via Telegram',
+      );
       for (const p of photos) {
-        try { fs.unlinkSync(p.filePath); } catch {}
+        try {
+          fs.unlinkSync(p.filePath);
+        } catch {}
       }
     } catch (err) {
-      logger.warn({ err, jid, count: photos.length }, 'Failed to send media group, falling back to individual photos');
+      logger.warn(
+        { err, jid, count: photos.length },
+        'Failed to send media group, falling back to individual photos',
+      );
       // Fall back to sending individually
       for (const p of photos) {
         try {
@@ -423,7 +447,9 @@ export class TelegramChannel implements Channel {
               } catch {}
             }
             if (item.type === 'photo' && item.filePath) {
-              try { fs.unlinkSync(item.filePath); } catch {}
+              try {
+                fs.unlinkSync(item.filePath);
+              } catch {}
             }
             continue; // Skip to next item instead of retrying
           }
@@ -479,7 +505,10 @@ export class TelegramChannel implements Channel {
     }
 
     if (!fs.existsSync(item.filePath)) {
-      logger.warn({ filePath: item.filePath, jid: item.jid }, 'Photo file no longer exists, dropping from queue');
+      logger.warn(
+        { filePath: item.filePath, jid: item.jid },
+        'Photo file no longer exists, dropping from queue',
+      );
       return;
     }
 
@@ -497,9 +526,15 @@ export class TelegramChannel implements Channel {
         const docStream = fs.createReadStream(item.filePath);
         const docOpts: Record<string, unknown> = {};
         if (item.caption) docOpts.caption = item.caption;
-        await bot.api.sendDocument(chatId, new InputFile(docStream), docOpts as any);
+        await bot.api.sendDocument(
+          chatId,
+          new InputFile(docStream),
+          docOpts as any,
+        );
         logger.info({ jid: item.jid }, 'Oversized photo sent as document');
-        try { fs.unlinkSync(item.filePath); } catch {}
+        try {
+          fs.unlinkSync(item.filePath);
+        } catch {}
         return;
       } catch (docErr) {
         logger.warn(
@@ -511,7 +546,9 @@ export class TelegramChannel implements Channel {
             await bot.api.sendMessage(chatId, item.caption);
           } catch {}
         }
-        try { fs.unlinkSync(item.filePath); } catch {}
+        try {
+          fs.unlinkSync(item.filePath);
+        } catch {}
         return; // Don't throw — this is a permanent failure, not retryable
       }
     }
@@ -521,7 +558,9 @@ export class TelegramChannel implements Channel {
     if (item.caption) opts.caption = item.caption;
     await bot.api.sendPhoto(chatId, new InputFile(stream), opts as any);
     logger.info({ jid: item.jid }, 'Photo sent via Telegram');
-    try { fs.unlinkSync(item.filePath); } catch {}
+    try {
+      fs.unlinkSync(item.filePath);
+    } catch {}
   }
 
   private async downloadTelegramFile(

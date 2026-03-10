@@ -69,7 +69,9 @@ export function shouldSuppressDuplicateIpcMessage(
     }
   }
 
-  const dedupeKey = [sourceGroup, chatJid, sender || '', normalizedText].join('::');
+  const dedupeKey = [sourceGroup, chatJid, sender || '', normalizedText].join(
+    '::',
+  );
   const previousTimestamp = recentIpcMessages.get(dedupeKey);
   recentIpcMessages.set(dedupeKey, now);
 
@@ -116,7 +118,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
 
       // Process messages from this group's IPC directory
       // Collect photos per chatJid so we can send them as a media group (album)
-      const pendingPhotos = new Map<string, Array<{ filePath: string; caption?: string; sourceGroup: string }>>();
+      const pendingPhotos = new Map<
+        string,
+        Array<{ filePath: string; caption?: string; sourceGroup: string }>
+      >();
       try {
         if (fs.existsSync(messagesDir)) {
           const messageFiles = fs
@@ -153,7 +158,8 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 ) {
                   // Route swarm messages (with a sender identity) through the bot pool
                   const isTelegramJid =
-                    /^-?\d+$/.test(data.chatJid) || /^c:-?\d+$/.test(data.chatJid);
+                    /^-?\d+$/.test(data.chatJid) ||
+                    /^c:-?\d+$/.test(data.chatJid);
                   if (data.sender && isTelegramJid) {
                     await sendPoolMessage(
                       data.chatJid,
@@ -332,6 +338,9 @@ export async function processTaskIpc(
     branch?: string;
     // For Slack
     reason?: string;
+    // For admin_reply
+    message?: string;
+    text?: string;
     // For Domain
     domain?: string;
     // For Search
@@ -722,6 +731,48 @@ export async function processTaskIpc(
           "✅ Your request has been forwarded to our support team. You'll hear back shortly!",
         );
       }
+      break;
+    }
+
+    case 'admin_reply': {
+      // Admin replies back to a specific client chat.
+      // Only allowed from the main group (enforced by isMain check in caller).
+      const targetJid = data.targetJid || data.chatJid;
+      const replyText = data.message || data.text;
+      if (!targetJid || !replyText) {
+        logger.warn(
+          { sourceGroup, data },
+          'admin_reply: missing targetJid or message',
+        );
+        break;
+      }
+      // Verify the source is the main group
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'admin_reply: rejected — only main group can use admin_reply',
+        );
+        break;
+      }
+      // Send the reply to the client
+      await deps.sendMessage(targetJid, replyText);
+      // Confirm back to admin
+      const adminGrp = Object.values(registeredGroups).find(
+        (g) => g.folder === MAIN_GROUP_FOLDER,
+      );
+      if (adminGrp) {
+        const targetLabel =
+          Object.values(registeredGroups).find((g) => g.jid === targetJid)
+            ?.name || targetJid;
+        await deps.sendMessage(
+          adminGrp.jid,
+          `✅ Reply sent to <b>${targetLabel}</b>`,
+        );
+      }
+      logger.info(
+        { sourceGroup, targetJid },
+        'Admin reply sent to client',
+      );
       break;
     }
 

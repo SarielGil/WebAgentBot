@@ -468,10 +468,13 @@ Be concrete and compact.`,
 
   // Collect media paths from the current batch so the agent can see uploaded images.
   // Only pass the most recent image — Gemini multimodal input accepts one image at a time.
-  const mediaMessages = slidingWindow.filter((m) => m.media_path && fs.existsSync(m.media_path));
-  const latestMediaPath = mediaMessages.length > 0
-    ? mediaMessages[mediaMessages.length - 1].media_path
-    : undefined;
+  const mediaMessages = slidingWindow.filter(
+    (m) => m.media_path && fs.existsSync(m.media_path),
+  );
+  const latestMediaPath =
+    mediaMessages.length > 0
+      ? mediaMessages[mediaMessages.length - 1].media_path
+      : undefined;
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -548,7 +551,13 @@ Be concrete and compact.`,
     }
   };
 
-  const output = await runAgent(group, finalPrompt, chatJid, onAgentOutput, latestMediaPath);
+  const output = await runAgent(
+    group,
+    finalPrompt,
+    chatJid,
+    onAgentOutput,
+    latestMediaPath,
+  );
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
@@ -580,7 +589,11 @@ Be concrete and compact.`,
     // don't roll back the cursor — re-processing would send duplicates.
     if (outputSentToUser || ipcSentOutput) {
       logger.warn(
-        { group: group.name, viaStreaming: outputSentToUser, viaIpc: ipcSentOutput },
+        {
+          group: group.name,
+          viaStreaming: outputSentToUser,
+          viaIpc: ipcSentOutput,
+        },
         'Agent error after output was sent, skipping cursor rollback to prevent duplicates',
       );
       return true;
@@ -824,8 +837,15 @@ export async function routeNewMessages(
           // sending visible duplicates to the user every time).
           if (messagesToSend.length > 0) {
             const lastPiped = messagesToSend[messagesToSend.length - 1];
-            const ts = 'timestamp' in lastPiped ? (lastPiped as { timestamp: string }).timestamp : '';
-            if (ts && (!lastAgentTimestamp[queueKey] || ts > lastAgentTimestamp[queueKey])) {
+            const ts =
+              'timestamp' in lastPiped
+                ? (lastPiped as { timestamp: string }).timestamp
+                : '';
+            if (
+              ts &&
+              (!lastAgentTimestamp[queueKey] ||
+                ts > lastAgentTimestamp[queueKey])
+            ) {
               lastAgentTimestamp[queueKey] = ts;
               saveState();
             }
@@ -985,7 +1005,12 @@ async function main(): Promise<void> {
       if (!channel.sendMediaGroup) {
         // Fall back to individual photos
         return photos.reduce(
-          (p, photo) => p.then(() => channel.sendPhoto?.(jid, photo.filePath, photo.caption) ?? Promise.resolve()),
+          (p, photo) =>
+            p.then(
+              () =>
+                channel.sendPhoto?.(jid, photo.filePath, photo.caption) ??
+                Promise.resolve(),
+            ),
           Promise.resolve(),
         );
       }
