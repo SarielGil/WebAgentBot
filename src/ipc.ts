@@ -769,10 +769,7 @@ export async function processTaskIpc(
           `✅ Reply sent to <b>${targetLabel}</b>`,
         );
       }
-      logger.info(
-        { sourceGroup, targetJid },
-        'Admin reply sent to client',
-      );
+      logger.info({ sourceGroup, targetJid }, 'Admin reply sent to client');
       break;
     }
 
