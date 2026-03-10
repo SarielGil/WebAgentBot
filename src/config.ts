@@ -17,7 +17,7 @@ export const ASSISTANT_NAME =
 export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER ||
     envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
-export const IDLE_TIMEOUT = 60_000; // 60 seconds — agent writes output markers; no output for 60s = dead container (prevents hanging for 2+ minutes)
+export const IDLE_TIMEOUT = 60_000; // 60 seconds — agent writes output markers; no output for 60s = dead container
 // Debounce window: reset on every new message, fire when user goes quiet.
 // 1500ms is the sweet spot — long enough to catch rapid follow-up messages,
 // short enough to feel responsive. (Typing events not available on Telegram/Slack bots.)
@@ -50,9 +50,9 @@ export const MAIN_GROUP_FOLDER = 'main';
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
 export const CONTAINER_TIMEOUT = parseInt(
-  process.env.CONTAINER_TIMEOUT || '300000',
+  process.env.CONTAINER_TIMEOUT || '600000',
   10,
-);
+); // 10 minutes — heavy builds (parallel_generate + git push + Pages verification + screenshots) need 4-5 min
 export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760',
   10,

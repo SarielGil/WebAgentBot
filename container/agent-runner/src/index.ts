@@ -1476,7 +1476,9 @@ NEVER skip the screenshot step — users must SEE visual previews, not just read
   let gotFinalAnswer = false;
   let usedSendMessage = false;  // Track whether send_message/send_photo was used during tool calls
   let sendMessageCount = 0;     // Hard cap on send_message calls per conversation turn
-  const MAX_SEND_MESSAGES = 1;  // Max text messages per turn (photos don't count)
+  const MAX_SEND_MESSAGES = 3;  // Max text messages per turn (photos don't count)
+  // Heavy build workflows need ≥2 text messages: acknowledgement + completion URL + next-steps.
+  // Previously 1 — caused suppression of completion messages, leaving users hanging.
   let consecutiveNudges = 0;    // Track consecutive <internal>-only responses to prevent infinite nudge loops
   const MAX_CONSECUTIVE_NUDGES = 2;
   let pendingIpcForNextTurn: string[] = [];  // IPC messages consumed during tool loop, saved for next conversation turn

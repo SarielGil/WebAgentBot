@@ -544,6 +544,13 @@ Be concrete and compact.`,
 
     if (result.status === 'success') {
       queue.notifyIdle(queueKey);
+      // Start/reset idle timer even for null results (IPC-only output).
+      // Without this, containers that send all messages via IPC (send_message/
+      // send_photo tools) never get an idle timer started, so _close is never
+      // written and the container hangs until the hard timeout kills it.
+      if (!result.result) {
+        resetIdleTimer();
+      }
     }
 
     if (result.status === 'error') {
