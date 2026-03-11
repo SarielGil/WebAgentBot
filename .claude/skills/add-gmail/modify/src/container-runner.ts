@@ -13,19 +13,42 @@ import {
   CONTAINER_TIMEOUT,
   DATA_DIR,
   GROUPS_DIR,
+  HOST_PROJECT_ROOT,
   IDLE_TIMEOUT,
   TIMEZONE,
 } from './config.js';
 import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
-import { CONTAINER_RUNTIME_BIN, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import {
+  CONTAINER_RUNTIME_BIN,
+  readonlyMountArgs,
+  stopContainer,
+} from './container-runtime.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+
+/**
+ * Translate an orchestrator-internal path to the equivalent HOST path.
+ * When running in Docker (DooD), process.cwd() is e.g. /app but the Docker
+ * daemon on the host needs the real macOS/host path for volume mounts.
+ */
+function toHostPath(containerInternalPath: string): string {
+  const containerRoot = process.cwd();
+  if (
+    HOST_PROJECT_ROOT !== containerRoot &&
+    containerInternalPath.startsWith(containerRoot)
+  ) {
+    return (
+      HOST_PROJECT_ROOT + containerInternalPath.slice(containerRoot.length)
+    );
+  }
+  return containerInternalPath;
+}
 
 export interface ContainerInput {
   prompt: string;
@@ -34,8 +57,11 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  singleTurn?: boolean;
   assistantName?: string;
   secrets?: Record<string, string>;
+  mediaPath?: string;
+  mediaMetadata?: string;
 }
 
 export interface ContainerOutput {
@@ -67,21 +93,21 @@ function buildVolumeMounts(
     // (src/, dist/, package.json, etc.) which would bypass the sandbox
     // entirely on next restart.
     mounts.push({
-      hostPath: projectRoot,
+      hostPath: toHostPath(projectRoot),
       containerPath: '/workspace/project',
       readonly: true,
     });
 
     // Main also gets its group folder as the working directory
     mounts.push({
-      hostPath: groupDir,
+      hostPath: toHostPath(groupDir),
       containerPath: '/workspace/group',
       readonly: false,
     });
   } else {
     // Other groups only get their own folder
     mounts.push({
-      hostPath: groupDir,
+      hostPath: toHostPath(groupDir),
       containerPath: '/workspace/group',
       readonly: false,
     });
@@ -91,11 +117,23 @@ function buildVolumeMounts(
     const globalDir = path.join(GROUPS_DIR, 'global');
     if (fs.existsSync(globalDir)) {
       mounts.push({
-        hostPath: globalDir,
+        hostPath: toHostPath(globalDir),
         containerPath: '/workspace/global',
         readonly: true,
       });
     }
+  }
+
+  // Mount per-group media directory (read-only).
+  // Each group only sees files uploaded to its own chat — no cross-group leakage.
+  // Files are deleted after the agent run completes (see processGroupMessages).
+  const mediaDir = path.resolve(DATA_DIR, 'media', group.folder);
+  if (fs.existsSync(mediaDir)) {
+    mounts.push({
+      hostPath: toHostPath(mediaDir),
+      containerPath: '/workspace/media',
+      readonly: true,
+    });
   }
 
   // Per-group Claude sessions directory (isolated from other groups)
@@ -109,19 +147,26 @@ function buildVolumeMounts(
   fs.mkdirSync(groupSessionsDir, { recursive: true });
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
   if (!fs.existsSync(settingsFile)) {
-    fs.writeFileSync(settingsFile, JSON.stringify({
-      env: {
-        // Enable agent swarms (subagent orchestration)
-        // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
-        CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-        // Load CLAUDE.md from additional mounted directories
-        // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
-        CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-        // Enable Claude's memory feature (persists user preferences between sessions)
-        // https://code.claude.com/docs/en/memory#manage-auto-memory
-        CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
-      },
-    }, null, 2) + '\n');
+    fs.writeFileSync(
+      settingsFile,
+      JSON.stringify(
+        {
+          env: {
+            // Enable agent swarms (subagent orchestration)
+            // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
+            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+            // Load CLAUDE.md from additional mounted directories
+            // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
+            CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+            // Enable Claude's memory feature (persists user preferences between sessions)
+            // https://code.claude.com/docs/en/memory#manage-auto-memory
+            CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+          },
+        },
+        null,
+        2,
+      ) + '\n',
+    );
   }
 
   // Sync skills from container/skills/ into each group's .claude/skills/
@@ -136,7 +181,7 @@ function buildVolumeMounts(
     }
   }
   mounts.push({
-    hostPath: groupSessionsDir,
+    hostPath: toHostPath(groupSessionsDir),
     containerPath: '/home/node/.claude',
     readonly: false,
   });
@@ -157,8 +202,9 @@ function buildVolumeMounts(
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
+  fs.mkdirSync(path.join(groupIpcDir, 'media'), { recursive: true });
   mounts.push({
-    hostPath: groupIpcDir,
+    hostPath: toHostPath(groupIpcDir),
     containerPath: '/workspace/ipc',
     readonly: false,
   });
@@ -166,13 +212,23 @@ function buildVolumeMounts(
   // Copy agent-runner source into a per-group writable location so agents
   // can customize it (add tools, change behavior) without affecting other
   // groups. Recompiled on container startup via entrypoint.sh.
-  const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
-  const groupAgentRunnerDir = path.join(DATA_DIR, 'sessions', group.folder, 'agent-runner-src');
+  const agentRunnerSrc = path.join(
+    projectRoot,
+    'container',
+    'agent-runner',
+    'src',
+  );
+  const groupAgentRunnerDir = path.join(
+    DATA_DIR,
+    'sessions',
+    group.folder,
+    'agent-runner-src',
+  );
   if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
     fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
   }
   mounts.push({
-    hostPath: groupAgentRunnerDir,
+    hostPath: toHostPath(groupAgentRunnerDir),
     containerPath: '/app/src',
     readonly: false,
   });
@@ -195,10 +251,20 @@ function buildVolumeMounts(
  * Secrets are never written to disk or mounted as files.
  */
 function readSecrets(): Record<string, string> {
-  return readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
+  return readEnvFile([
+    'ANTHROPIC_API_KEY',
+    'CLAUDE_CODE_OAUTH_TOKEN',
+    'GEMINI_API_KEY',
+    'XAI_API_KEY',
+    'GITHUB_TOKEN',
+    'BRAVE_API_KEY',
+  ]);
 }
 
-function buildContainerArgs(mounts: VolumeMount[], containerName: string): string[] {
+function buildContainerArgs(
+  mounts: VolumeMount[],
+  containerName: string,
+): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Pass host timezone so container's local time matches the user's
@@ -292,9 +358,12 @@ export async function runContainerAgent(
     let parseBuffer = '';
     let newSessionId: string | undefined;
     let outputChain = Promise.resolve();
+    let stalled = false;
+    let lastAnyActivityAt = Date.now();
 
     container.stdout.on('data', (data) => {
       const chunk = data.toString();
+      lastAnyActivityAt = Date.now();
 
       // Always accumulate for logging
       if (!stdoutTruncated) {
@@ -347,6 +416,7 @@ export async function runContainerAgent(
 
     container.stderr.on('data', (data) => {
       const chunk = data.toString();
+      lastAnyActivityAt = Date.now();
       const lines = chunk.trim().split('\n');
       for (const line of lines) {
         if (line) logger.debug({ container: group.folder }, line);
@@ -376,10 +446,16 @@ export async function runContainerAgent(
 
     const killOnTimeout = () => {
       timedOut = true;
-      logger.error({ group: group.name, containerName }, 'Container timeout, stopping gracefully');
+      logger.error(
+        { group: group.name, containerName },
+        'Container timeout, stopping gracefully',
+      );
       exec(stopContainer(containerName), { timeout: 15000 }, (err) => {
         if (err) {
-          logger.warn({ group: group.name, containerName, err }, 'Graceful stop failed, force killing');
+          logger.warn(
+            { group: group.name, containerName, err },
+            'Graceful stop failed, force killing',
+          );
           container.kill('SIGKILL');
         }
       });
@@ -393,22 +469,53 @@ export async function runContainerAgent(
       timeout = setTimeout(killOnTimeout, timeoutMs);
     };
 
+    // Watchdog: if the container produces no stdout/stderr activity for too long,
+    // treat it as stuck and recycle it so the queue can retry automatically.
+    const stallTimeoutMs = Math.max(
+      IDLE_TIMEOUT,
+      parseInt(process.env.CONTAINER_STALL_TIMEOUT_MS || '120000', 10) ||
+        120000,
+    );
+    const stallInterval = setInterval(() => {
+      if (Date.now() - lastAnyActivityAt < stallTimeoutMs) {
+        return;
+      }
+      stalled = true;
+      logger.error(
+        { group: group.name, containerName, stallTimeoutMs },
+        'Container stalled (no activity), stopping gracefully',
+      );
+      exec(stopContainer(containerName), { timeout: 15000 }, (err) => {
+        if (err) {
+          logger.warn(
+            { group: group.name, containerName, err },
+            'Graceful stop failed for stalled container, force killing',
+          );
+          container.kill('SIGKILL');
+        }
+      });
+    }, 5000);
+
     container.on('close', (code) => {
       clearTimeout(timeout);
+      clearInterval(stallInterval);
       const duration = Date.now() - startTime;
 
       if (timedOut) {
         const ts = new Date().toISOString().replace(/[:.]/g, '-');
         const timeoutLog = path.join(logsDir, `container-${ts}.log`);
-        fs.writeFileSync(timeoutLog, [
-          `=== Container Run Log (TIMEOUT) ===`,
-          `Timestamp: ${new Date().toISOString()}`,
-          `Group: ${group.name}`,
-          `Container: ${containerName}`,
-          `Duration: ${duration}ms`,
-          `Exit Code: ${code}`,
-          `Had Streaming Output: ${hadStreamingOutput}`,
-        ].join('\n'));
+        fs.writeFileSync(
+          timeoutLog,
+          [
+            `=== Container Run Log (TIMEOUT) ===`,
+            `Timestamp: ${new Date().toISOString()}`,
+            `Group: ${group.name}`,
+            `Container: ${containerName}`,
+            `Duration: ${duration}ms`,
+            `Exit Code: ${code}`,
+            `Had Streaming Output: ${hadStreamingOutput}`,
+          ].join('\n'),
+        );
 
         // Timeout after output = idle cleanup, not failure.
         // The agent already sent its response; this is just the
@@ -443,7 +550,8 @@ export async function runContainerAgent(
 
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const logFile = path.join(logsDir, `container-${timestamp}.log`);
-      const isVerbose = process.env.LOG_LEVEL === 'debug' || process.env.LOG_LEVEL === 'trace';
+      const isVerbose =
+        process.env.LOG_LEVEL === 'debug' || process.env.LOG_LEVEL === 'trace';
 
       const logLines = [
         `=== Container Run Log ===`,
@@ -514,7 +622,9 @@ export async function runContainerAgent(
         resolve({
           status: 'error',
           result: null,
-          error: `Container exited with code ${code}: ${stderr.slice(-200)}`,
+          error: stalled
+            ? `Container stalled (no activity for ${stallTimeoutMs}ms) and was recycled`
+            : `Container exited with code ${code}: ${stderr.slice(-200)}`,
         });
         return;
       }
@@ -586,7 +696,10 @@ export async function runContainerAgent(
 
     container.on('error', (err) => {
       clearTimeout(timeout);
-      logger.error({ group: group.name, containerName, error: err }, 'Container spawn error');
+      logger.error(
+        { group: group.name, containerName, error: err },
+        'Container spawn error',
+      );
       resolve({
         status: 'error',
         result: null,

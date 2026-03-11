@@ -9,20 +9,35 @@ import { readEnvFile } from './env.js';
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
+<<<<<<< /home/runner/work/WebAgentBot/WebAgentBot/.claude/skills/add-telegram/modify/src/config.ts
   'TELEGRAM_BOT_TOKEN',
   'TELEGRAM_ONLY',
+=======
+  'TELEGRAM_BOT_POOL',
+>>>>>>> /home/runner/work/WebAgentBot/WebAgentBot/src/config.ts
 ]);
 
 export const ASSISTANT_NAME =
   process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
 export const ASSISTANT_HAS_OWN_NUMBER =
-  (process.env.ASSISTANT_HAS_OWN_NUMBER || envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
-export const POLL_INTERVAL = 2000;
+  (process.env.ASSISTANT_HAS_OWN_NUMBER ||
+    envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
+export const IDLE_TIMEOUT = 60_000; // 60 seconds — agent writes output markers; no output for 60s = dead container
+// Debounce window: reset on every new message, fire when user goes quiet.
+// 1500ms is the sweet spot — long enough to catch rapid follow-up messages,
+// short enough to feel responsive. (Typing events not available on Telegram/Slack bots.)
+export const BATCH_DELAY = 1_500;
+export const POLL_INTERVAL = 3_000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
 // Absolute paths needed for container mounts
 const PROJECT_ROOT = process.cwd();
 const HOME_DIR = process.env.HOME || os.homedir();
+
+// When running inside Docker (DooD setup), the orchestrator's cwd is /app but
+// sub-agents are sibling containers that need HOST-side paths for volume mounts.
+export const HOST_PROJECT_ROOT: string =
+  process.env.HOST_PROJECT_ROOT || PROJECT_ROOT;
 
 // Mount security: allowlist stored OUTSIDE project root, never mounted into containers
 export const MOUNT_ALLOWLIST_PATH = path.join(
@@ -34,23 +49,20 @@ export const MOUNT_ALLOWLIST_PATH = path.join(
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
+export const MEDIA_DIR = path.resolve(DATA_DIR, 'media');
 export const MAIN_GROUP_FOLDER = 'main';
 
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
 export const CONTAINER_TIMEOUT = parseInt(
-  process.env.CONTAINER_TIMEOUT || '1800000',
+  process.env.CONTAINER_TIMEOUT || '600000',
   10,
-);
+); // 10 minutes — heavy builds (parallel_generate + git push + Pages verification + screenshots) need 4-5 min
 export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760',
   10,
 ); // 10MB default
 export const IPC_POLL_INTERVAL = 1000;
-export const IDLE_TIMEOUT = parseInt(
-  process.env.IDLE_TIMEOUT || '1800000',
-  10,
-); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
   1,
   parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5,
@@ -70,8 +82,20 @@ export const TRIGGER_PATTERN = new RegExp(
 export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
 
+<<<<<<< /home/runner/work/WebAgentBot/WebAgentBot/.claude/skills/add-telegram/modify/src/config.ts
 // Telegram configuration
 export const TELEGRAM_BOT_TOKEN =
   process.env.TELEGRAM_BOT_TOKEN || envConfig.TELEGRAM_BOT_TOKEN || '';
 export const TELEGRAM_ONLY =
   (process.env.TELEGRAM_ONLY || envConfig.TELEGRAM_ONLY) === 'true';
+=======
+// Telegram Agent Swarm: comma-separated bot tokens for the pool
+export const TELEGRAM_BOT_POOL = (
+  process.env.TELEGRAM_BOT_POOL ||
+  envConfig.TELEGRAM_BOT_POOL ||
+  ''
+)
+  .split(',')
+  .map((t) => t.trim())
+  .filter(Boolean);
+>>>>>>> /home/runner/work/WebAgentBot/WebAgentBot/src/config.ts
