@@ -129,7 +129,11 @@ export function _resetRecentIpcMessagesForTests(): void {
 }
 
 function ensureRoadmapReadmeForWebsitePush(
-  files: Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }>,
+  files: Array<{
+    path: string;
+    content: string;
+    encoding?: 'utf-8' | 'base64';
+  }>,
   repoName: string,
   sourceGroup: string,
 ): Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }> {
@@ -194,7 +198,11 @@ function ensureRoadmapReadmeForWebsitePush(
 }
 
 function ensureSocialPreviewMetaForWebsitePush(
-  files: Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }>,
+  files: Array<{
+    path: string;
+    content: string;
+    encoding?: 'utf-8' | 'base64';
+  }>,
   owner: string,
   repoName: string,
 ): Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }> {
@@ -253,7 +261,11 @@ function ensureSocialPreviewMetaForWebsitePush(
 }
 
 function ensurePhotoContainStylesForWebsitePush(
-  files: Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }>,
+  files: Array<{
+    path: string;
+    content: string;
+    encoding?: 'utf-8' | 'base64';
+  }>,
 ): Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }> {
   const indexIdx = files.findIndex((f) => /^index\.html$/i.test(f.path));
   if (indexIdx === -1) return files;
@@ -290,7 +302,11 @@ function ensurePhotoContainStylesForWebsitePush(
 }
 
 function ensureSiteMetadataFilesForWebsitePush(
-  files: Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }>,
+  files: Array<{
+    path: string;
+    content: string;
+    encoding?: 'utf-8' | 'base64';
+  }>,
   owner: string,
   repoName: string,
 ): Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }> {
@@ -322,11 +338,20 @@ function ensureSiteMetadataFilesForWebsitePush(
     indexHtml.match(/<title>([^<]+)<\/title>/i)?.[1]?.trim() || repoSlug;
   const pageDescription =
     indexHtml
-      .match(/<meta\s+name=["']description["']\s+content=["']([^"']+)["']/i)?.[1]
+      .match(
+        /<meta\s+name=["']description["']\s+content=["']([^"']+)["']/i,
+      )?.[1]
       ?.trim() || `Website for ${repoSlug}.`;
 
-  const headings = Array.from(indexHtml.matchAll(/<h[1-3][^>]*>(.*?)<\/h[1-3]>/gi))
-    .map((m) => m[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim())
+  const headings = Array.from(
+    indexHtml.matchAll(/<h[1-3][^>]*>(.*?)<\/h[1-3]>/gi),
+  )
+    .map((m) =>
+      m[1]
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim(),
+    )
     .filter(Boolean)
     .slice(0, 12);
 
@@ -372,11 +397,21 @@ function ensureSiteMetadataFilesForWebsitePush(
   ].join('\n');
 
   const upsert = (
-    input: Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }>,
+    input: Array<{
+      path: string;
+      content: string;
+      encoding?: 'utf-8' | 'base64';
+    }>,
     pathName: string,
     content: string,
-  ): Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }> => {
-    const idx = input.findIndex((f) => f.path.toLowerCase() === pathName.toLowerCase());
+  ): Array<{
+    path: string;
+    content: string;
+    encoding?: 'utf-8' | 'base64';
+  }> => {
+    const idx = input.findIndex(
+      (f) => f.path.toLowerCase() === pathName.toLowerCase(),
+    );
     if (idx === -1) return [...input, { path: pathName, content }];
     const next = [...input];
     next[idx] = { ...next[idx], path: pathName, content, encoding: 'utf-8' };
@@ -397,7 +432,11 @@ function ensureSiteMetadataFilesForWebsitePush(
 }
 
 function ensureCanonicalMetaForWebsitePush(
-  files: Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }>,
+  files: Array<{
+    path: string;
+    content: string;
+    encoding?: 'utf-8' | 'base64';
+  }>,
   owner: string,
   repoName: string,
 ): Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }> {
@@ -436,7 +475,11 @@ function ensureCanonicalMetaForWebsitePush(
 }
 
 function validateSiteMetadataConsistency(
-  files: Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }>,
+  files: Array<{
+    path: string;
+    content: string;
+    encoding?: 'utf-8' | 'base64';
+  }>,
   owner: string,
   repoName: string,
 ): void {
@@ -446,16 +489,22 @@ function validateSiteMetadataConsistency(
     .filter((f) => f.encoding !== 'base64' && /\.html?$/i.test(f.path))
     .map((f) => f.path.replace(/^\/+/, ''));
   const expectedUrls = new Set(
-    htmlPages.map((p) => (p.toLowerCase() === 'index.html' ? baseUrl : `${baseUrl}${p}`)),
+    htmlPages.map((p) =>
+      p.toLowerCase() === 'index.html' ? baseUrl : `${baseUrl}${p}`,
+    ),
   );
 
   const sitemap = files.find((f) => f.path.toLowerCase() === 'sitemap.xml');
   const robots = files.find((f) => f.path.toLowerCase() === 'robots.txt');
   const llms = files.find((f) => f.path.toLowerCase() === 'llms.txt');
   if (!sitemap || !robots || !llms) {
-    throw new Error('Missing required metadata files (sitemap.xml / robots.txt / llms.txt)');
+    throw new Error(
+      'Missing required metadata files (sitemap.xml / robots.txt / llms.txt)',
+    );
   }
-  const locs = Array.from(sitemap.content.matchAll(/<loc>([^<]+)<\/loc>/g)).map((m) => m[1]);
+  const locs = Array.from(sitemap.content.matchAll(/<loc>([^<]+)<\/loc>/g)).map(
+    (m) => m[1],
+  );
   for (const loc of locs) {
     if (!expectedUrls.has(loc)) {
       throw new Error(`sitemap.xml contains non-existent page URL: ${loc}`);
@@ -549,132 +598,136 @@ export function startIpcWatcher(deps: IpcDeps): void {
             messageFiles,
             IPC_DELIVERY_CONCURRENCY,
             async (file) => {
-            const filePath = path.join(messagesDir, file);
-            try {
-              const fileStat = fs.statSync(filePath);
-              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              const queuedMs = Date.now() - fileStat.mtimeMs;
-              if (data.type === 'message' && data.chatJid && data.text) {
-                if (
-                  shouldSuppressDuplicateIpcMessage(
-                    sourceGroup,
-                    data.chatJid,
-                    data.text,
-                    data.sender,
-                  )
-                ) {
-                  logger.warn(
-                    { chatJid: data.chatJid, sourceGroup, sender: data.sender },
-                    'Suppressed duplicate IPC message',
-                  );
-                  fs.unlinkSync(filePath);
-                  return;
-                }
-
-                // Authorization: verify this group can send to this chatJid
-                const targetGroup = Object.values(registeredGroups).find(
-                  (g) => g.jid === data.chatJid,
-                );
-                if (
-                  isMain ||
-                  (targetGroup && targetGroup.folder === sourceGroup)
-                ) {
-                  const sendStartedAt = Date.now();
-                  // Route swarm messages (with a sender identity) through the bot pool
-                  const isTelegramJid =
-                    /^-?\d+$/.test(data.chatJid) ||
-                    /^c:-?\d+$/.test(data.chatJid);
-                  if (data.sender && isTelegramJid) {
-                    await sendPoolMessage(
+              const filePath = path.join(messagesDir, file);
+              try {
+                const fileStat = fs.statSync(filePath);
+                const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+                const queuedMs = Date.now() - fileStat.mtimeMs;
+                if (data.type === 'message' && data.chatJid && data.text) {
+                  if (
+                    shouldSuppressDuplicateIpcMessage(
+                      sourceGroup,
                       data.chatJid,
                       data.text,
                       data.sender,
-                      sourceGroup,
-                      (jid, text) => deps.sendMessage(jid, text),
-                    );
-                  } else {
-                    await deps.sendMessage(data.chatJid, data.text);
-                  }
-                  queue.markIpcOutputSent(sourceGroup);
-                  logger.info(
-                    {
-                      chatJid: data.chatJid,
-                      sourceGroup,
-                      sender: data.sender,
-                      queuedMs,
-                      sendMs: Date.now() - sendStartedAt,
-                    },
-                    'IPC message sent',
-                  );
-                } else {
-                  logger.warn(
-                    { chatJid: data.chatJid, sourceGroup },
-                    'Unauthorized IPC message attempt blocked',
-                  );
-                }
-              } else if (
-                data.type === 'photo' &&
-                data.chatJid &&
-                data.mediaFile
-              ) {
-                const targetGroup = Object.values(registeredGroups).find(
-                  (g) => g.jid === data.chatJid,
-                );
-                if (
-                  isMain ||
-                  (targetGroup && targetGroup.folder === sourceGroup)
-                ) {
-                  if (deps.sendPhoto) {
-                    const hostMediaPath = path.join(
-                      ipcBaseDir,
-                      sourceGroup,
-                      'media',
-                      path.basename(data.mediaFile),
-                    );
-                    // Batch photos for album sending — collect now, send after loop
-                    if (!pendingPhotos.has(data.chatJid)) {
-                      pendingPhotos.set(data.chatJid, []);
-                    }
-                    pendingPhotos.get(data.chatJid)!.push({
-                      filePath: hostMediaPath,
-                      caption: data.caption || undefined,
-                      sourceGroup,
-                    });
-                    logger.debug(
+                    )
+                  ) {
+                    logger.warn(
                       {
                         chatJid: data.chatJid,
                         sourceGroup,
-                        mediaFile: path.basename(data.mediaFile),
-                        queuedMs,
+                        sender: data.sender,
                       },
-                      'Queued IPC photo for batched delivery',
+                      'Suppressed duplicate IPC message',
+                    );
+                    fs.unlinkSync(filePath);
+                    return;
+                  }
+
+                  // Authorization: verify this group can send to this chatJid
+                  const targetGroup = Object.values(registeredGroups).find(
+                    (g) => g.jid === data.chatJid,
+                  );
+                  if (
+                    isMain ||
+                    (targetGroup && targetGroup.folder === sourceGroup)
+                  ) {
+                    const sendStartedAt = Date.now();
+                    // Route swarm messages (with a sender identity) through the bot pool
+                    const isTelegramJid =
+                      /^-?\d+$/.test(data.chatJid) ||
+                      /^c:-?\d+$/.test(data.chatJid);
+                    if (data.sender && isTelegramJid) {
+                      await sendPoolMessage(
+                        data.chatJid,
+                        data.text,
+                        data.sender,
+                        sourceGroup,
+                        (jid, text) => deps.sendMessage(jid, text),
+                      );
+                    } else {
+                      await deps.sendMessage(data.chatJid, data.text);
+                    }
+                    queue.markIpcOutputSent(sourceGroup);
+                    logger.info(
+                      {
+                        chatJid: data.chatJid,
+                        sourceGroup,
+                        sender: data.sender,
+                        queuedMs,
+                        sendMs: Date.now() - sendStartedAt,
+                      },
+                      'IPC message sent',
                     );
                   } else {
                     logger.warn(
-                      { chatJid: data.chatJid },
-                      'sendPhoto not supported by channel, dropping photo IPC',
+                      { chatJid: data.chatJid, sourceGroup },
+                      'Unauthorized IPC message attempt blocked',
                     );
                   }
-                } else {
-                  logger.warn(
-                    { chatJid: data.chatJid, sourceGroup },
-                    'Unauthorized IPC photo attempt blocked',
+                } else if (
+                  data.type === 'photo' &&
+                  data.chatJid &&
+                  data.mediaFile
+                ) {
+                  const targetGroup = Object.values(registeredGroups).find(
+                    (g) => g.jid === data.chatJid,
                   );
+                  if (
+                    isMain ||
+                    (targetGroup && targetGroup.folder === sourceGroup)
+                  ) {
+                    if (deps.sendPhoto) {
+                      const hostMediaPath = path.join(
+                        ipcBaseDir,
+                        sourceGroup,
+                        'media',
+                        path.basename(data.mediaFile),
+                      );
+                      // Batch photos for album sending — collect now, send after loop
+                      if (!pendingPhotos.has(data.chatJid)) {
+                        pendingPhotos.set(data.chatJid, []);
+                      }
+                      pendingPhotos.get(data.chatJid)!.push({
+                        filePath: hostMediaPath,
+                        caption: data.caption || undefined,
+                        sourceGroup,
+                      });
+                      logger.debug(
+                        {
+                          chatJid: data.chatJid,
+                          sourceGroup,
+                          mediaFile: path.basename(data.mediaFile),
+                          queuedMs,
+                        },
+                        'Queued IPC photo for batched delivery',
+                      );
+                    } else {
+                      logger.warn(
+                        { chatJid: data.chatJid },
+                        'sendPhoto not supported by channel, dropping photo IPC',
+                      );
+                    }
+                  } else {
+                    logger.warn(
+                      { chatJid: data.chatJid, sourceGroup },
+                      'Unauthorized IPC photo attempt blocked',
+                    );
+                  }
                 }
+                fs.unlinkSync(filePath);
+              } catch (err) {
+                logger.error(
+                  { file, sourceGroup, err },
+                  'Error processing IPC message',
+                );
+                const errorDir = path.join(ipcBaseDir, 'errors');
+                fs.mkdirSync(errorDir, { recursive: true });
+                fs.renameSync(
+                  filePath,
+                  path.join(errorDir, `${sourceGroup}-${file}`),
+                );
               }
-              fs.unlinkSync(filePath);
-            } catch (err) {
-              logger.error(
-                { file, sourceGroup, err },
-                'Error processing IPC message',
-              );
-              const errorDir = path.join(ipcBaseDir, 'errors');
-              fs.mkdirSync(errorDir, { recursive: true });
-              fs.renameSync(
-                filePath,
-                path.join(errorDir, `${sourceGroup}-${file}`),
-              );
-            }
             },
           );
         }
@@ -695,7 +748,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
             if (deps.sendMediaGroup && photos.length > 1) {
               await deps.sendMediaGroup(
                 chatJid,
-                photos.map((p) => ({ filePath: p.filePath, caption: p.caption })),
+                photos.map((p) => ({
+                  filePath: p.filePath,
+                  caption: p.caption,
+                })),
               );
             } else if (deps.sendPhoto) {
               for (const p of photos) {

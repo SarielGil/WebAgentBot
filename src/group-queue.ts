@@ -296,7 +296,10 @@ export class GroupQueue {
       }
     }
 
-    logger.info({ groupJid }, 'Preempt requested for active run due to new media');
+    logger.info(
+      { groupJid },
+      'Preempt requested for active run due to new media',
+    );
     return true;
   }
 

@@ -24,7 +24,10 @@ const senderBotMap = new Map<string, number>();
 let nextPoolIndex = 0;
 const TELEGRAM_MESSAGE_MAX_LEN = 4000;
 
-function splitTelegramText(text: string, maxLen = TELEGRAM_MESSAGE_MAX_LEN): string[] {
+function splitTelegramText(
+  text: string,
+  maxLen = TELEGRAM_MESSAGE_MAX_LEN,
+): string[] {
   if (text.length <= maxLen) return [text];
   const chunks: string[] = [];
   let cursor = 0;
@@ -322,9 +325,7 @@ export class TelegramChannel implements Channel {
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       // Fallback for malformed HTML entities/tags in dynamic content (search snippets, URLs, etc.)
-      if (
-        /can't parse entities|bad request/i.test(errMsg)
-      ) {
+      if (/can't parse entities|bad request/i.test(errMsg)) {
         try {
           await bot.api.sendMessage(chatId, text);
           logger.warn(
@@ -341,7 +342,11 @@ export class TelegramChannel implements Channel {
     }
   }
 
-  private async sendTextInChunks(bot: Bot, chatId: string, text: string): Promise<void> {
+  private async sendTextInChunks(
+    bot: Bot,
+    chatId: string,
+    text: string,
+  ): Promise<void> {
     const chunks = splitTelegramText(text);
     for (const chunk of chunks) {
       try {

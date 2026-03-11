@@ -31,7 +31,10 @@ export class SearchService {
       }
     }
     if (results.length === 0) {
-      logger.warn({ query: normalizedQuery }, 'Using google-it fallback search provider');
+      logger.warn(
+        { query: normalizedQuery },
+        'Using google-it fallback search provider',
+      );
       results = await this.searchGoogle(normalizedQuery);
     }
     return this.rankAndFilter(results, normalizedQuery);
@@ -65,7 +68,10 @@ export class SearchService {
     }));
   }
 
-  private rankAndFilter(results: SearchResult[], query: string): SearchResult[] {
+  private rankAndFilter(
+    results: SearchResult[],
+    query: string,
+  ): SearchResult[] {
     const inspirationIntent =
       /\b(inspiration|inspire|ideas?|examples?|reference|references|moodboard|style|competitors?|similar)\b/i.test(
         query,
@@ -118,15 +124,21 @@ export class SearchService {
       let matchedTerms = 0;
       for (const term of queryTerms) {
         const titleHit = title.toLowerCase().includes(term);
-        const bodyHit = haystack.includes(term) || link.toLowerCase().includes(term);
+        const bodyHit =
+          haystack.includes(term) || link.toLowerCase().includes(term);
         if (titleHit) score += 3;
         if (bodyHit) score += 1;
         if (titleHit || bodyHit) matchedTerms++;
       }
       if (/wikipedia\.org\/wiki\/category:/i.test(link)) score -= 3;
-      if (/tripadvisor\.|pinterest\.|directory|list of/i.test(haystack)) score -= 2;
+      if (/tripadvisor\.|pinterest\.|directory|list of/i.test(haystack))
+        score -= 2;
       if (snippet.length < 40) score -= 1;
-      if (primaryTerm && !haystack.includes(primaryTerm) && !link.toLowerCase().includes(primaryTerm)) {
+      if (
+        primaryTerm &&
+        !haystack.includes(primaryTerm) &&
+        !link.toLowerCase().includes(primaryTerm)
+      ) {
         score -= 4;
       }
 
