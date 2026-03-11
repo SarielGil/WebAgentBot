@@ -17,6 +17,7 @@
 import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
+import crypto from 'crypto';
 import { query, HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { GoogleGenAI } from '@google/genai';
 import { fileURLToPath } from 'url';
@@ -51,6 +52,14 @@ interface SessionEntry {
 
 interface SessionsIndex {
   entries: SessionEntry[];
+}
+
+function isGreetingLike(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  if (!t) return false;
+  return /^(hi|hello|hey|shalom|היי|הי|שלום|hey there|hi there)[!.,\s]*$/i.test(
+    t,
+  );
 }
 
 interface SDKUserMessage {
@@ -769,6 +778,37 @@ async function parallelGenerate(
   backend: 'gemini' | 'grok',
   xaiApiKey?: string,
 ): Promise<string> {
+  const cacheDir = '/workspace/group/.nanoclaw-cache/parallel-generate';
+  fs.mkdirSync(cacheDir, { recursive: true });
+
+  const hashTask = (task: { prompt: string; output_path: string }): string => {
+    const h = crypto.createHash('sha256');
+    h.update(backend);
+    h.update('\n');
+    h.update(task.prompt);
+    return h.digest('hex');
+  };
+
+  const extractEmbeddedHtml = (prompt: string): string | null => {
+    const fenced = prompt.match(/```html\s*([\s\S]*?)```/i);
+    if (fenced?.[1]?.includes('<html')) return fenced[1].trim();
+    const raw = prompt.match(/<!DOCTYPE html[\s\S]*<\/html>/i);
+    if (raw?.[0]) return raw[0].trim();
+    return null;
+  };
+
+  const extractCopySource = (prompt: string): string | null => {
+    const quoted = prompt.match(
+      /\b(?:copy|duplicate|clone)\b[\s\S]*?(?:from|file)\s+["']([^"']+\.(?:html|htm|css|js))["']/i,
+    );
+    if (quoted?.[1]) return quoted[1];
+    const unquoted = prompt.match(
+      /\b(?:copy|duplicate|clone)\b[\s\S]*?(?:from|file)\s+(\/[^\s]+\.(?:html|htm|css|js))/i,
+    );
+    if (unquoted?.[1]) return unquoted[1];
+    return null;
+  };
+
   const startTime = Date.now();
   log(`parallel_generate: starting ${tasks.length} tasks in parallel (backend: ${backend})`);
 
@@ -776,33 +816,67 @@ async function parallelGenerate(
     tasks.map(async (task, i) => {
       const taskStart = Date.now();
       let content = '';
+      const cacheKey = hashTask(task);
+      const cachePath = path.join(cacheDir, `${cacheKey}.txt`);
 
-      if (backend === 'gemini') {
-        const ai = new GoogleGenAI({ apiKey });
-        const resp = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents: task.prompt,
-          config: { maxOutputTokens: 16384 },
-        });
-        content = (resp as any).text ?? '';
-      } else if (backend === 'grok' && xaiApiKey) {
-        const resp = await fetch('https://api.x.ai/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${xaiApiKey}`,
-          },
-          body: JSON.stringify({
-            model: 'grok-4-1-fast-reasoning',
-            messages: [
-              { role: 'system', content: 'You are a web designer. Return ONLY the requested code, no explanations or markdown fences.' },
-              { role: 'user', content: task.prompt },
-            ],
-          }),
-        });
-        if (!resp.ok) throw new Error(`xAI API error ${resp.status}`);
-        const data = await resp.json() as any;
-        content = data.choices?.[0]?.message?.content || '';
+      // Offload deterministic work: embedded HTML can be written directly.
+      const embeddedHtml = extractEmbeddedHtml(task.prompt);
+      if (embeddedHtml) {
+        content = embeddedHtml;
+      } else {
+        // Offload deterministic work: copy from an existing local file when requested.
+        const copySource = extractCopySource(task.prompt);
+        if (copySource && fs.existsSync(copySource)) {
+          content = fs.readFileSync(copySource, 'utf-8');
+        }
+      }
+
+      // Reuse cached result if this exact prompt/backend was generated before.
+      if (!content && fs.existsSync(cachePath)) {
+        content = fs.readFileSync(cachePath, 'utf-8');
+        const elapsed = Date.now() - taskStart;
+        fs.mkdirSync(path.dirname(task.output_path), { recursive: true });
+        fs.writeFileSync(task.output_path, content);
+        log(
+          `parallel_generate: task ${i + 1} cache hit in ${elapsed}ms (${content.length} chars) → ${task.output_path}`,
+        );
+        return {
+          path: task.output_path,
+          chars: content.length,
+          time: elapsed,
+          mode: 'cache' as const,
+        };
+      }
+
+      let mode: 'offload' | 'llm' = content ? 'offload' : 'llm';
+      if (!content) {
+        if (backend === 'gemini') {
+          const ai = new GoogleGenAI({ apiKey });
+          const resp = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: task.prompt,
+            config: { maxOutputTokens: 16384 },
+          });
+          content = (resp as any).text ?? '';
+        } else if (backend === 'grok' && xaiApiKey) {
+          const resp = await fetch('https://api.x.ai/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${xaiApiKey}`,
+            },
+            body: JSON.stringify({
+              model: 'grok-4-1-fast-reasoning',
+              messages: [
+                { role: 'system', content: 'You are a web designer. Return ONLY the requested code, no explanations or markdown fences.' },
+                { role: 'user', content: task.prompt },
+              ],
+            }),
+          });
+          if (!resp.ok) throw new Error(`xAI API error ${resp.status}`);
+          const data = await resp.json() as any;
+          content = data.choices?.[0]?.message?.content || '';
+        }
       }
 
       // Strip markdown code fences if present
@@ -811,23 +885,34 @@ async function parallelGenerate(
       // Write to file
       fs.mkdirSync(path.dirname(task.output_path), { recursive: true });
       fs.writeFileSync(task.output_path, content);
+      if (content) {
+        fs.writeFileSync(cachePath, content);
+      }
       const elapsed = Date.now() - taskStart;
-      log(`parallel_generate: task ${i + 1} done in ${elapsed}ms (${content.length} chars) → ${task.output_path}`);
-      return { path: task.output_path, chars: content.length, time: elapsed };
+      log(`parallel_generate: task ${i + 1} done in ${elapsed}ms (${content.length} chars, mode=${mode}) → ${task.output_path}`);
+      return { path: task.output_path, chars: content.length, time: elapsed, mode };
     }),
   );
 
   const totalTime = Date.now() - startTime;
+  let cacheHits = 0;
+  let offloaded = 0;
+  let llmCalls = 0;
   const summary = results.map((r, i) => {
     if (r.status === 'fulfilled') {
+      if (r.value.mode === 'cache') cacheHits++;
+      else if (r.value.mode === 'offload') offloaded++;
+      else llmCalls++;
       return `Task ${i + 1}: ✅ ${r.value.chars} chars in ${r.value.time}ms → ${r.value.path}`;
     } else {
       return `Task ${i + 1}: ❌ ${r.reason?.message || 'unknown error'}`;
     }
   });
 
-  log(`parallel_generate: all done in ${totalTime}ms (vs ~${totalTime * tasks.length}ms sequential)`);
-  return `All ${tasks.length} tasks completed in ${totalTime}ms (parallel):\n${summary.join('\n')}`;
+  log(
+    `parallel_generate: all done in ${totalTime}ms (vs ~${totalTime * tasks.length}ms sequential, cacheHits=${cacheHits}, offloaded=${offloaded}, llmCalls=${llmCalls})`,
+  );
+  return `All ${tasks.length} tasks completed in ${totalTime}ms (parallel, cache=${cacheHits}, offloaded=${offloaded}, llm=${llmCalls}):\n${summary.join('\n')}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -956,6 +1041,20 @@ async function runGrokBackend(containerInput: ContainerInput, initialPrompt: str
     {
       type: 'function',
       function: {
+        name: 'web_search',
+        description: 'Request a web search from the host service and send results back to the user asynchronously.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Search query string' },
+          },
+          required: ['query'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
         name: 'parallel_generate',
         description: 'Generate multiple files in PARALLEL using independent LLM calls. ~3x faster than generating one at a time. Use this when you need to create multiple HTML files, design options, or any independent content simultaneously. Each task gets its own LLM call running concurrently.',
         parameters: {
@@ -991,6 +1090,9 @@ async function runGrokBackend(containerInput: ContainerInput, initialPrompt: str
   systemInstruction += `\n\n## Tool Name Mapping (IMPORTANT)
 When the instructions above mention \`mcp__nanoclaw__send_message\`, use the \`send_message\` tool instead.
 When they mention \`mcp__nanoclaw__send_photo\`, use the \`send_photo\` tool instead.
+When they mention \`mcp__nanoclaw__web_search\`, use the \`web_search\` tool instead.
+Do NOT run \`web_search ...\` as a bash command.
+Do NOT run \`ls /workspace/media\` unless a media file was explicitly provided.
 To take a screenshot, use \`bash\` with agent-browser commands. Example:
 \`\`\`
 agent-browser open file:///tmp/mypage/index.html
@@ -1031,7 +1133,7 @@ NEVER skip the screenshot step — users must SEE visual previews, not just read
         result = execSync(args.command, { cwd: '/workspace/group', shell: '/bin/bash', timeout: 120_000, maxBuffer: 2 * 1024 * 1024 }).toString();
       } else if (name === 'send_message') {
         const ipcFile = `/workspace/ipc/messages/grok_${Date.now()}.json`;
-        fs.writeFileSync(ipcFile, JSON.stringify({ type: 'message', chatJid: containerInput.chatJid, text: args.text }));
+        fs.writeFileSync(ipcFile, JSON.stringify({ type: 'message', chatJid: containerInput.chatJid, text: args.text, timestamp: new Date().toISOString() }));
         result = 'Message sent';
         isSend = true;
       } else if (name === 'read_file') {
@@ -1056,10 +1158,22 @@ NEVER skip the screenshot step — users must SEE visual previews, not just read
             chatJid: containerInput.chatJid,
             mediaFile,
             caption: args.caption || '',
+            timestamp: new Date().toISOString(),
           }));
           result = `Photo queued for delivery: ${mediaFile}`;
           isSend = true;
         }
+      } else if (name === 'web_search') {
+        fs.mkdirSync('/workspace/ipc/tasks', { recursive: true });
+        const ipcFile = `/workspace/ipc/tasks/web_search_${Date.now()}.json`;
+        fs.writeFileSync(ipcFile, JSON.stringify({
+          type: 'web_search',
+          chatJid: containerInput.chatJid,
+          query: args.query,
+          timestamp: new Date().toISOString(),
+        }));
+        result = `Search queued: ${args.query}`;
+        isSend = true;
       } else if (name === 'parallel_generate') {
         // This is async — handled separately below
         result = '__PARALLEL_GENERATE__';
@@ -1308,6 +1422,17 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
       },
     },
     {
+      name: 'web_search',
+      description: 'Request a web search from the host service and send results back to the user asynchronously.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search query string' },
+        },
+        required: ['query'],
+      },
+    },
+    {
       name: 'parallel_generate',
       description: 'Generate multiple files in PARALLEL using independent LLM calls. ~3x faster than generating one at a time. Use this when you need to create multiple HTML files, design options, or any independent content simultaneously.',
       parameters: {
@@ -1345,6 +1470,9 @@ async function runGeminiFallback(containerInput: ContainerInput, initialPrompt: 
   systemInstruction += `\n\n## Tool Name Mapping (IMPORTANT)
 When the instructions above mention \`mcp__nanoclaw__send_message\`, use the \`send_message\` tool instead.
 When they mention \`mcp__nanoclaw__send_photo\`, use the \`send_photo\` tool instead.
+When they mention \`mcp__nanoclaw__web_search\`, use the \`web_search\` tool instead.
+Do NOT run \`web_search ...\` as a bash command.
+Do NOT run \`ls /workspace/media\` unless a media file was explicitly provided.
 To take a screenshot, use \`bash\` with agent-browser commands. Example:
 \`\`\`
 agent-browser open file:///tmp/mypage/index.html
@@ -1476,9 +1604,12 @@ NEVER skip the screenshot step — users must SEE visual previews, not just read
   let gotFinalAnswer = false;
   let usedSendMessage = false;  // Track whether send_message/send_photo was used during tool calls
   let sendMessageCount = 0;     // Hard cap on send_message calls per conversation turn
-  const MAX_SEND_MESSAGES = 2;  // Max text messages per turn (photos don't count)
-  // Heavy build workflows need 2 text messages: acknowledgement + combined completion.
-  // 1 caused suppression; 3 caused triple-message spam. 2 is the sweet spot.
+  const simpleGreetingTurn = isGreetingLike(
+    typeof humanPrompt === 'string' ? humanPrompt : '',
+  );
+  const MAX_SEND_MESSAGES = simpleGreetingTurn ? 1 : 4;  // Max text messages per turn
+  // Keep greeting-only turns to one message; allow richer turns to send a few updates.
+  let greetingSent = false;
   let consecutiveNudges = 0;    // Track consecutive <internal>-only responses to prevent infinite nudge loops
   const MAX_CONSECUTIVE_NUDGES = 2;
   let pendingIpcForNextTurn: string[] = [];  // IPC messages consumed during tool loop, saved for next conversation turn
@@ -1589,12 +1720,18 @@ NEVER skip the screenshot step — users must SEE visual previews, not just read
           if (sendMessageCount >= MAX_SEND_MESSAGES) {
             result = `Message suppressed — you have already sent ${MAX_SEND_MESSAGES} messages this turn. Combine your text into fewer, longer messages instead of many short ones.`;
             log(`send_message suppressed (${sendMessageCount}/${MAX_SEND_MESSAGES} cap reached)`);
+          } else if (isGreetingLike(args.text || '') && greetingSent) {
+            result = 'Duplicate greeting suppressed in this turn. Continue with actionable content.';
+            log('send_message suppressed (duplicate greeting)');
           } else {
             const ipcFile = `/workspace/ipc/messages/gemini_${Date.now()}.json`;
-            fs.writeFileSync(ipcFile, JSON.stringify({ type: 'message', chatJid: containerInput.chatJid, text: args.text }));
+            fs.writeFileSync(ipcFile, JSON.stringify({ type: 'message', chatJid: containerInput.chatJid, text: args.text, timestamp: new Date().toISOString() }));
             result = 'Message sent';
             sendMessageCount++;
             usedSendMessage = true;
+            if (isGreetingLike(args.text || '')) {
+              greetingSent = true;
+            }
           }
         } else if (fn.name === 'read_file') {
           result = fs.existsSync(args.path) ? fs.readFileSync(args.path, 'utf-8') : 'File not found';
@@ -1618,10 +1755,25 @@ NEVER skip the screenshot step — users must SEE visual previews, not just read
               chatJid: containerInput.chatJid,
               mediaFile,
               caption: args.caption || '',
+              timestamp: new Date().toISOString(),
             }));
             result = `Photo queued for delivery: ${mediaFile}`;
             usedSendMessage = true;
           }
+        } else if (fn.name === 'web_search') {
+          fs.mkdirSync('/workspace/ipc/tasks', { recursive: true });
+          const ipcFile = `/workspace/ipc/tasks/web_search_${Date.now()}.json`;
+          fs.writeFileSync(
+            ipcFile,
+            JSON.stringify({
+              type: 'web_search',
+              chatJid: containerInput.chatJid,
+              query: args.query,
+              timestamp: new Date().toISOString(),
+            }),
+          );
+          result = `Search queued: ${args.query}`;
+          usedSendMessage = true;
         } else if (fn.name === 'parallel_generate') {
           const geminiKey = (containerInput.secrets as Record<string, string> | undefined)?.GEMINI_API_KEY;
           const xaiKey = (containerInput.secrets as Record<string, string> | undefined)?.XAI_API_KEY;

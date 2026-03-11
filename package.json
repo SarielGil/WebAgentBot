@@ -31,7 +31,9 @@
     "test:flow:verbose": "bash scripts/test-flow.sh --verbose",
     "test:e2e": "tsx scripts/test-flow-e2e.ts",
     "test:e2e:verbose": "tsx scripts/test-flow-e2e.ts --verbose",
-    "test:e2e:clean": "npm run reset:client -- client1 c:774133756 --hard && npm run docker:build && npm run test:e2e -- --verbose"
+    "test:e2e:clean": "npm run reset:client -- client1 c:774133756 --hard && npm run docker:build && npm run test:e2e -- --verbose",
+    "simulate:autopilot": "bash scripts/simulate-autopilot.sh smoke",
+    "simulate:autopilot:full": "bash scripts/simulate-autopilot.sh full"
   },
   "dependencies": {
     "@google/genai": "^1.0.0",

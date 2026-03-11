@@ -68,6 +68,7 @@ let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 export const batchTimers = new Map<string, NodeJS.Timeout>();
 const batchPendingMessages = new Map<string, NewMessage[]>();
+const MEDIA_RETENTION_MS = 24 * 60 * 60 * 1000; // 24h
 
 let telegram: TelegramChannel;
 export let githubService: GitHubService;
@@ -108,6 +109,53 @@ function loadState(): void {
 function saveState(): void {
   setRouterState('last_timestamp', lastTimestamp);
   setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
+}
+
+function recoverPipedInputs(): void {
+  for (const [folder, group] of Object.entries(registeredGroups)) {
+    const inputDir = path.join(DATA_DIR, 'ipc', folder, 'input');
+    try {
+      const pending = fs
+        .readdirSync(inputDir)
+        .filter((f) => f.endsWith('.json')).length;
+      if (pending > 0) {
+        logger.warn(
+          { group: group.name, folder, pending },
+          'Recovered pending piped IPC input files',
+        );
+        queue.enqueueMessageCheck(folder);
+      }
+    } catch {
+      // input dir may not exist yet
+    }
+  }
+}
+
+function pruneOldGroupMedia(groupFolder: string): void {
+  const dir = path.join(MEDIA_DIR, groupFolder);
+  if (!fs.existsSync(dir)) return;
+  const now = Date.now();
+  try {
+    for (const file of fs.readdirSync(dir)) {
+      const filePath = path.join(dir, file);
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(filePath);
+      } catch {
+        continue;
+      }
+      if (!stat.isFile()) continue;
+      if (now - stat.mtimeMs > MEDIA_RETENTION_MS) {
+        try {
+          fs.unlinkSync(filePath);
+        } catch {
+          // ignore best-effort cleanup
+        }
+      }
+    }
+  } catch {
+    // best-effort cleanup only
+  }
 }
 
 function registerGroup(jid: string, group: RegisteredGroup): void {
@@ -173,6 +221,19 @@ function mergeBatchMessages(
   return [...merged.values()].sort((a, b) =>
     a.timestamp.localeCompare(b.timestamp),
   );
+}
+
+function buildRecentContinuationContext(
+  chatJid: string,
+  beforeTimestamp: string,
+): string {
+  const all = getMessagesSince(chatJid, '', ASSISTANT_NAME);
+  const prior = all
+    .filter((m) => m.timestamp < beforeTimestamp)
+    .filter((m) => (m.content || '').trim().length > 0)
+    .slice(-12);
+  if (prior.length === 0) return '';
+  return formatMessages(prior);
 }
 
 /** Build a per-group trigger regex from its stored trigger string (e.g. "@Pixel") */
@@ -379,6 +440,8 @@ async function processGroupMessages(queueKey: string): Promise<boolean> {
   }
 
   const isMain = group.folder === MAIN_GROUP_FOLDER;
+  const turnStartedAt = Date.now();
+  const prepStartedAt = Date.now();
 
   // 0. Move any freshly-downloaded media files into this group's isolated subdirectory.
   //    The Telegram bot downloads to the flat data/media/ dir; we relocate them here
@@ -394,6 +457,7 @@ async function processGroupMessages(queueKey: string): Promise<boolean> {
       }
     }
   }
+  const mediaPrepMs = Date.now() - prepStartedAt;
 
   // 1. Handle Media Analysis Turns
   for (const msg of missedMessages) {
@@ -447,6 +511,7 @@ Be concrete and compact.`,
     sessions[group.folder] || { sessionId: '' };
 
   // Refresh durable memory frequently so user preferences are carried across turns.
+  const summaryStartedAt = Date.now();
   if (shouldRefreshSummary(missedMessages, !!session.summary)) {
     await refreshConversationSummary(
       group,
@@ -457,12 +522,36 @@ Be concrete and compact.`,
       missedMessages,
     );
   }
+  const summaryMs = Date.now() - summaryStartedAt;
 
   // 3. Final Prompt Construction
   const slidingWindow = missedMessages.slice(-25);
   let contextPrompt = '';
+  const mediaOnlyFollowUp =
+    slidingWindow.some((m) => !!m.media_path) &&
+    slidingWindow.every((m) => !(m.content || '').trim());
+
   if (session.summary) {
     contextPrompt += `<conversation_summary>\n${session.summary}\n</conversation_summary>\n\n`;
+  }
+  if (mediaOnlyFollowUp) {
+    contextPrompt +=
+      '<continuation_hint>\n' +
+      'The user sent media-only follow-up message(s). This CONTINUES the current project/request.\n' +
+      'Do not restart discovery or open a new flow. Use the uploaded media as additional assets for the existing task.\n' +
+      '</continuation_hint>\n\n';
+
+    // If summary memory is not available yet, inject recent text history so
+    // media-only turns still inherit the original request instead of starting over.
+    if (!session.summary && slidingWindow[0]?.timestamp) {
+      const recentContext = buildRecentContinuationContext(
+        chatJid,
+        slidingWindow[0].timestamp,
+      );
+      if (recentContext) {
+        contextPrompt += `<recent_project_context>\n${recentContext}\n</recent_project_context>\n\n`;
+      }
+    }
   }
   const finalPrompt = contextPrompt + formatMessages(slidingWindow);
 
@@ -476,6 +565,26 @@ Be concrete and compact.`,
       ? mediaMessages[mediaMessages.length - 1].media_path
       : undefined;
 
+  // Always expose currently available uploaded media assets to the model so
+  // generated samples use real client photos rather than placeholders.
+  const availableMediaPaths = fs.existsSync(groupMediaDir)
+    ? fs
+        .readdirSync(groupMediaDir)
+        .filter((f) => /\.(png|jpe?g|webp|gif|mp4|mov|webm)$/i.test(f))
+        .map((f) => `/workspace/media/${f}`)
+        .slice(-20)
+    : [];
+  if (availableMediaPaths.length > 0) {
+    contextPrompt +=
+      '<available_media_assets>\n' +
+      'Client-uploaded assets currently available in this run:\n' +
+      `${availableMediaPaths.map((p) => `- ${p}`).join('\n')}\n` +
+      '\n' +
+      'When generating website samples/options, USE these assets in hero/gallery/sections.\n' +
+      'Do not use placeholder stock images when real uploaded assets exist.\n' +
+      '</available_media_assets>\n\n';
+  }
+
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
   const previousCursor = lastAgentTimestamp[queueKey] || '';
@@ -484,22 +593,41 @@ Be concrete and compact.`,
   saveState();
 
   logger.info(
-    { group: group.name, messageCount: missedMessages.length },
+    {
+      group: group.name,
+      messageCount: missedMessages.length,
+      mediaPrepMs,
+      summaryMs,
+      prepTotalMs: Date.now() - prepStartedAt,
+    },
     'Processing messages',
   );
 
-  // Track idle timer for closing stdin when agent is idle
+  // Track idle timer for closing stdin when agent is idle.
+  // The timer is ONLY started after the agent emits an output marker (meaning
+  // it finished work and is waiting for the next message). When a user message
+  // is piped, we CANCEL the timer — the agent is about to do work and may take
+  // minutes for heavy builds (parallel_generate + git push + Pages verification).
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
+      const closed = queue.closeStdinIfIdle(queueKey);
       logger.debug(
-        { group: group.name },
-        'Idle timeout, closing container stdin',
+        { group: group.name, closed },
+        closed
+          ? 'Idle timeout, closing container stdin'
+          : 'Idle timeout skipped close due to recent input/active work',
       );
-      queue.closeStdin(queueKey);
     }, IDLE_TIMEOUT);
+  };
+
+  const cancelIdleTimer = () => {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
   };
 
   await channel.setTyping?.(chatJid, true);
@@ -511,9 +639,11 @@ Be concrete and compact.`,
   // main agent container instead of being consumed by singleTurn sub-containers.
   queue.markReady(queueKey);
 
-  // Register idle-timer reset callback so that piping a message via
-  // sendMessage() defers _close — the agent is about to receive work.
-  queue.setOnMessagePiped(queueKey, resetIdleTimer);
+  // Register callback so that piping a message via sendMessage() CANCELS
+  // the idle timer — the agent is about to receive heavy work and shouldn't
+  // be killed mid-task. The idle timer will restart when the agent emits its
+  // next output marker.
+  queue.setOnMessagePiped(queueKey, cancelIdleTimer);
 
   const onAgentOutput = async (result: ContainerOutput) => {
     // Streaming output callback — called for each agent result
@@ -558,7 +688,8 @@ Be concrete and compact.`,
     }
   };
 
-  const output = await runAgent(
+  const agentStartedAt = Date.now();
+  const runResult = await runAgent(
     group,
     finalPrompt,
     chatJid,
@@ -567,31 +698,49 @@ Be concrete and compact.`,
   );
 
   await channel.setTyping?.(chatJid, false);
-  if (idleTimer) clearTimeout(idleTimer);
+  cancelIdleTimer();
   queue.clearOnMessagePiped(queueKey);
+  logger.info(
+    {
+      group: group.name,
+      totalTurnMs: Date.now() - turnStartedAt,
+      prepMs: agentStartedAt - prepStartedAt,
+      agentMs: Date.now() - agentStartedAt,
+    },
+    'Message processing turn finished',
+  );
 
-  // Delete this group's media files — they're no longer needed after the agent has processed them.
-  if (fs.existsSync(groupMediaDir)) {
-    try {
-      fs.rmSync(groupMediaDir, { recursive: true, force: true });
-      logger.debug(
-        { group: group.name },
-        'Cleaned up group media files after agent run',
-      );
-    } catch (err) {
-      logger.warn(
-        { group: group.name, err },
-        'Failed to clean up group media files',
-      );
-    }
-  }
+  // Keep group media for a retention window so retries and follow-up turns
+  // can still use uploaded photos. Only prune stale files.
+  pruneOldGroupMedia(group.folder);
 
   // Check if IPC watcher delivered messages/photos to the user on behalf
   // of this container (agent used send_message/send_photo tools).
   const ipcSentOutput = queue.hasIpcOutputSent(queueKey);
   queue.clearIpcOutputSent(queueKey);
 
-  if (output === 'error' || hadError) {
+  if (runResult.status === 'error' || hadError) {
+    const retriableCrash =
+      runResult.status === 'error' &&
+      /code 137|timed out|stalled/i.test(runResult.error || '');
+    if (retriableCrash) {
+      // Crash/timeouts are retriable. Roll back so the latest turn is replayed.
+      lastAgentTimestamp[queueKey] = previousCursor;
+      saveState();
+      logger.error(
+        { group: group.name, error: runResult.error, hadError },
+        'Retriable container failure, rolled back cursor for automatic replay',
+      );
+      await slackChannel
+        .sendEscalation(
+          chatJid,
+          'system',
+          `Retriable container failure for ${group.name}: ${runResult.error || 'unknown error'}`,
+        )
+        .catch(() => false);
+      return false;
+    }
+
     // If we already sent output to the user (via streaming OR IPC),
     // don't roll back the cursor — re-processing would send duplicates.
     if (outputSentToUser || ipcSentOutput) {
@@ -624,7 +773,7 @@ async function runAgent(
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
   mediaPath?: string,
-): Promise<'success' | 'error'> {
+): Promise<{ status: 'success' | 'error'; error?: string }> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const session = sessions[group.folder];
   const sessionKey = getSessionScopeKey(group.folder, chatJid);
@@ -715,13 +864,19 @@ async function runAgent(
         { group: group.name, error: output.error },
         'Container agent error',
       );
-      return 'error';
+      return {
+        status: 'error',
+        error: String(output.error || 'Container agent error'),
+      };
     }
 
-    return 'success';
+    return { status: 'success' };
   } catch (err) {
     logger.error({ group: group.name, err }, 'Agent error');
-    return 'error';
+    return {
+      status: 'error',
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 
@@ -736,6 +891,9 @@ async function startMessageLoop(): Promise<void> {
 
   while (true) {
     try {
+      // Recover piped IPC inputs that may remain after restarts/crashes.
+      recoverPipedInputs();
+
       const jids = [
         ...new Set(Object.values(registeredGroups).map((g) => g.jid)),
       ];
@@ -829,6 +987,25 @@ export async function routeNewMessages(
         const messagesToSend =
           allPending.length > 0 ? allPending : bufferedMessages;
         const formatted = formatMessages(messagesToSend);
+        const hasMediaInBatch = messagesToSend.some((m) => !!m.media_path);
+
+        // Never pipe media-bearing turns into an active container via text IPC.
+        // Piping drops binary media context and can cause "missing photos" in
+        // generation/deploy flows. Force a normal queued run so runAgent gets
+        // mediaPath and /workspace/media mount semantics.
+        if (hasMediaInBatch) {
+          const preempted = queue.preemptForMedia(queueKey);
+          logger.info(
+            { chatJid, queueKey, count: messagesToSend.length, preempted },
+            preempted
+              ? 'Detected media in pending batch, preempting active run for media-aware restart'
+              : 'Detected media in pending batch, scheduling full run (no IPC piping)',
+          );
+          if (!preempted) {
+            queue.enqueueMessageCheck(queueKey);
+          }
+          return;
+        }
 
         if (queue.sendMessage(queueKey, formatted)) {
           logger.debug(

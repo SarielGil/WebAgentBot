@@ -346,9 +346,12 @@ export async function runContainerAgent(
     let parseBuffer = '';
     let newSessionId: string | undefined;
     let outputChain = Promise.resolve();
+    let stalled = false;
+    let lastAnyActivityAt = Date.now();
 
     container.stdout.on('data', (data) => {
       const chunk = data.toString();
+      lastAnyActivityAt = Date.now();
 
       // Always accumulate for logging
       if (!stdoutTruncated) {
@@ -401,6 +404,7 @@ export async function runContainerAgent(
 
     container.stderr.on('data', (data) => {
       const chunk = data.toString();
+      lastAnyActivityAt = Date.now();
       const lines = chunk.trim().split('\n');
       for (const line of lines) {
         if (line) logger.debug({ container: group.folder }, line);
@@ -453,8 +457,36 @@ export async function runContainerAgent(
       timeout = setTimeout(killOnTimeout, timeoutMs);
     };
 
+    // Watchdog: if the container produces no stdout/stderr activity for too long,
+    // treat it as stuck and recycle it so the queue can retry automatically.
+    const stallTimeoutMs = Math.max(
+      IDLE_TIMEOUT,
+      parseInt(process.env.CONTAINER_STALL_TIMEOUT_MS || '120000', 10) ||
+        120000,
+    );
+    const stallInterval = setInterval(() => {
+      if (Date.now() - lastAnyActivityAt < stallTimeoutMs) {
+        return;
+      }
+      stalled = true;
+      logger.error(
+        { group: group.name, containerName, stallTimeoutMs },
+        'Container stalled (no activity), stopping gracefully',
+      );
+      exec(stopContainer(containerName), { timeout: 15000 }, (err) => {
+        if (err) {
+          logger.warn(
+            { group: group.name, containerName, err },
+            'Graceful stop failed for stalled container, force killing',
+          );
+          container.kill('SIGKILL');
+        }
+      });
+    }, 5000);
+
     container.on('close', (code) => {
       clearTimeout(timeout);
+      clearInterval(stallInterval);
       const duration = Date.now() - startTime;
 
       if (timedOut) {
@@ -578,7 +610,9 @@ export async function runContainerAgent(
         resolve({
           status: 'error',
           result: null,
-          error: `Container exited with code ${code}: ${stderr.slice(-200)}`,
+          error: stalled
+            ? `Container stalled (no activity for ${stallTimeoutMs}ms) and was recycled`
+            : `Container exited with code ${code}: ${stderr.slice(-200)}`,
         });
         return;
       }

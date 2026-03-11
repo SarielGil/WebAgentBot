@@ -48,6 +48,12 @@ export class GroupQueue {
    */
   private messagePipedCallbacks = new Map<string, () => void>();
   /**
+   * Per-group timestamp of the most recent successfully piped IPC message.
+   * Used to avoid idle-timeout close races when a message arrives right as
+   * the host is about to write the _close sentinel.
+   */
+  private lastMessagePipedAt = new Map<string, number>();
+  /**
    * Per-group flag indicating that the IPC watcher delivered at least one
    * outbound message (send_message/send_photo) to the user on behalf of
    * this group's active container.  Used by processGroupMessages to avoid
@@ -244,6 +250,7 @@ export class GroupQueue {
       const tempPath = `${filepath}.tmp`;
       fs.writeFileSync(tempPath, JSON.stringify({ type: 'message', text }));
       fs.renameSync(tempPath, filepath);
+      this.lastMessagePipedAt.set(groupJid, Date.now());
       // Notify the host so it can reset its idle timer — piped messages
       // mean the agent is about to do work and _close should be deferred.
       this.messagePipedCallbacks.get(groupJid)?.();
@@ -267,6 +274,47 @@ export class GroupQueue {
     } catch {
       // ignore
     }
+  }
+
+  /**
+   * Media preemption: when new photos arrive during an active long-running turn,
+   * request an immediate restart so the next run includes fresh media context.
+   * Returns true when a preemption signal was issued.
+   */
+  preemptForMedia(groupJid: string): boolean {
+    const state = this.getGroup(groupJid);
+    if (!state.active) return false;
+
+    state.pendingMessages = true;
+    this.closeStdin(groupJid);
+
+    if (state.process && !state.process.killed) {
+      try {
+        state.process.kill('SIGTERM');
+      } catch {
+        // best effort
+      }
+    }
+
+    logger.info({ groupJid }, 'Preempt requested for active run due to new media');
+    return true;
+  }
+
+  /**
+   * Close stdin only if the container is still idle and no message was piped
+   * recently. Returns true when _close was written.
+   */
+  closeStdinIfIdle(groupJid: string, recentWindowMs = 2500): boolean {
+    const state = this.getGroup(groupJid);
+    if (!state.active || !state.idleWaiting || !state.groupFolder) {
+      return false;
+    }
+    const lastPipedAt = this.lastMessagePipedAt.get(groupJid) ?? 0;
+    if (Date.now() - lastPipedAt < recentWindowMs) {
+      return false;
+    }
+    this.closeStdin(groupJid);
+    return true;
   }
 
   private async runForGroup(
@@ -300,8 +348,10 @@ export class GroupQueue {
       this.scheduleRetry(groupJid, state);
     } finally {
       // Check for orphaned IPC input files — messages that were piped
-      // but never consumed by the container.  If found, force a
+      // but never consumed by the container. If found, force a
       // reprocessing cycle so they aren't silently lost.
+      // NOTE: we intentionally DO NOT delete these files here; they are
+      // durable recovery artifacts and must survive orchestrator restarts.
       if (state.groupFolder) {
         const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
         try {
@@ -310,13 +360,6 @@ export class GroupQueue {
             .filter((f) => f.endsWith('.json'));
           if (orphans.length > 0) {
             state.pendingMessages = true;
-            for (const f of orphans) {
-              try {
-                fs.unlinkSync(path.join(inputDir, f));
-              } catch {
-                /* ignore */
-              }
-            }
             logger.warn(
               { groupJid, orphanedCount: orphans.length },
               'Found orphaned IPC input files after container exit, scheduling reprocessing',
@@ -327,6 +370,7 @@ export class GroupQueue {
         }
       }
       this.messagePipedCallbacks.delete(groupJid);
+      this.lastMessagePipedAt.delete(groupJid);
       state.active = false;
       state.process = null;
       state.containerName = null;

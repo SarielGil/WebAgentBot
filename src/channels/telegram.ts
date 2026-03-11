@@ -22,6 +22,27 @@ const poolApis: Api[] = [];
 /** Maps "{groupFolder}:{senderName}" → pool Api index for stable per-group assignment. */
 const senderBotMap = new Map<string, number>();
 let nextPoolIndex = 0;
+const TELEGRAM_MESSAGE_MAX_LEN = 4000;
+
+function splitTelegramText(text: string, maxLen = TELEGRAM_MESSAGE_MAX_LEN): string[] {
+  if (text.length <= maxLen) return [text];
+  const chunks: string[] = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    let end = Math.min(cursor + maxLen, text.length);
+    if (end < text.length) {
+      const nl = text.lastIndexOf('\n', end);
+      const sp = text.lastIndexOf(' ', end);
+      const boundary = Math.max(nl, sp);
+      if (boundary > cursor + Math.floor(maxLen * 0.6)) {
+        end = boundary;
+      }
+    }
+    chunks.push(text.slice(cursor, end).trim());
+    cursor = end;
+  }
+  return chunks.filter((c) => c.length > 0);
+}
 
 /**
  * Initialize send-only Api instances for the bot pool.
@@ -293,14 +314,46 @@ export class TelegramChannel implements Channel {
     const bot = this.botForJid(jid);
     const chatId = this.rawChatId(jid);
     try {
-      await bot.api.sendMessage(chatId, text, { parse_mode: 'HTML' });
+      await this.sendTextInChunks(bot, chatId, text);
       logger.info(
         { jid, botIndex: this.bots.indexOf(bot) },
         'Message sent via Telegram',
       );
     } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      // Fallback for malformed HTML entities/tags in dynamic content (search snippets, URLs, etc.)
+      if (
+        /can't parse entities|bad request/i.test(errMsg)
+      ) {
+        try {
+          await bot.api.sendMessage(chatId, text);
+          logger.warn(
+            { jid, botIndex: this.bots.indexOf(bot) },
+            'Telegram HTML parse failed, resent as plain text',
+          );
+          return;
+        } catch {
+          // fallback to queue below
+        }
+      }
       this.enqueueOutgoing({ type: 'message', jid, text });
       logger.warn({ err, jid }, 'Failed to send Telegram message, queued');
+    }
+  }
+
+  private async sendTextInChunks(bot: Bot, chatId: string, text: string): Promise<void> {
+    const chunks = splitTelegramText(text);
+    for (const chunk of chunks) {
+      try {
+        await bot.api.sendMessage(chatId, chunk, { parse_mode: 'HTML' });
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (/can't parse entities|bad request/i.test(errMsg)) {
+          await bot.api.sendMessage(chatId, chunk);
+          continue;
+        }
+        throw err;
+      }
     }
   }
 
@@ -496,7 +549,7 @@ export class TelegramChannel implements Channel {
     const chatId = this.rawChatId(item.jid);
 
     if (item.type === 'message') {
-      await bot.api.sendMessage(chatId, item.text, { parse_mode: 'HTML' });
+      await this.sendTextInChunks(bot, chatId, item.text);
       logger.info(
         { jid: item.jid, botIndex: this.bots.indexOf(bot) },
         'Message sent via Telegram',

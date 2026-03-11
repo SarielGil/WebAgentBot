@@ -45,6 +45,7 @@ vi.mock('fs', async () => {
     default: {
       ...actual,
       existsSync: vi.fn(() => true),
+      statSync: vi.fn(() => ({ size: 1024 })),
       createReadStream: vi.fn(() => new PassThrough()),
       createWriteStream: vi.fn(() => ({
         on: vi.fn((event, cb) => {
@@ -180,5 +181,16 @@ describe('Telegram Media Handling', () => {
     await vi.advanceTimersByTimeAsync(5000);
 
     expect(bot.api.sendPhoto).toHaveBeenCalledTimes(2);
+  });
+
+  it('splits long outgoing messages into multiple Telegram sends', async () => {
+    const bot = (channel as any).bots[0];
+    (channel as any).connected = true;
+    bot.api.sendMessage.mockResolvedValue(undefined);
+
+    const longText = 'x'.repeat(9000);
+    await channel.sendMessage('12345', longText);
+
+    expect(bot.api.sendMessage).toHaveBeenCalledTimes(3);
   });
 });

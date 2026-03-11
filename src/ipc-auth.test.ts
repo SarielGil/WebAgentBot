@@ -123,7 +123,7 @@ describe('IPC duplicate suppression', () => {
       shouldSuppressDuplicateIpcMessage(
         'other-group',
         'other@g.us',
-        'Hello there',
+        'Project update',
         'Agent A',
         1_000,
       ),
@@ -133,11 +133,55 @@ describe('IPC duplicate suppression', () => {
       shouldSuppressDuplicateIpcMessage(
         'other-group',
         'other@g.us',
-        'Hello there',
+        'Project update',
         'Agent B',
         5_000,
       ),
     ).toBe(false);
+  });
+
+  it('suppresses repeated greeting variants within the dedupe window', () => {
+    expect(
+      shouldSuppressDuplicateIpcMessage(
+        'other-group',
+        'other@g.us',
+        'Hi there',
+        'Agent A',
+        1_000,
+      ),
+    ).toBe(false);
+
+    expect(
+      shouldSuppressDuplicateIpcMessage(
+        'other-group',
+        'other@g.us',
+        'hello!',
+        'Agent A',
+        5_000,
+      ),
+    ).toBe(true);
+  });
+
+  it('suppresses greeting duplicates across different sender identities', () => {
+    expect(
+      shouldSuppressDuplicateIpcMessage(
+        'other-group',
+        'other@g.us',
+        'Hi',
+        'Agent A',
+        1_000,
+      ),
+    ).toBe(false);
+
+    expect(
+      shouldSuppressDuplicateIpcMessage(
+        'other-group',
+        'other@g.us',
+        'Hello',
+        'Agent B',
+        2_000,
+      ),
+    ).toBe(true);
   });
 });
 

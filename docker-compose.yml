@@ -15,6 +15,7 @@ services:
       # Required for DooD (Docker-out-of-Docker) volume mount path translation.
       # It is loaded via env_file above; listed here only as documentation.
       HOST_PROJECT_ROOT: ${HOST_PROJECT_ROOT}
+      LOG_LEVEL: debug
     restart: unless-stopped
     # Interactive mode for Telegram auth if needed (though grammy handles it via env token usually)
     stdin_open: true

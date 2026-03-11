@@ -6,6 +6,7 @@ import { CronExpressionParser } from 'cron-parser';
 
 import {
   DATA_DIR,
+  GROUPS_DIR,
   IPC_POLL_INTERVAL,
   MAIN_GROUP_FOLDER,
   TIMEZONE,
@@ -45,10 +46,38 @@ export interface IpcDeps {
 
 let ipcWatcherRunning = false;
 const IPC_DUPLICATE_WINDOW_MS = 15_000;
+const IPC_DELIVERY_CONCURRENCY = 4;
 const recentIpcMessages = new Map<string, number>();
+
+async function runWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  if (items.length === 0) return;
+  const width = Math.max(1, Math.min(limit, items.length));
+  let index = 0;
+  const workers = Array.from({ length: width }, async () => {
+    while (true) {
+      const current = index++;
+      if (current >= items.length) return;
+      await fn(items[current]);
+    }
+  });
+  await Promise.all(workers);
+}
 
 function normalizeIpcMessageText(text: string): string {
   return text.trim();
+}
+
+function isGreetingLike(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  if (!t) return false;
+  const short = t.replace(/[^\p{L}\p{N}\s]/gu, '').trim();
+  return /^(hi|hello|hey|shalom|good (morning|afternoon|evening)|how can i help|how may i help)/i.test(
+    short,
+  );
 }
 
 export function shouldSuppressDuplicateIpcMessage(
@@ -75,6 +104,20 @@ export function shouldSuppressDuplicateIpcMessage(
   const previousTimestamp = recentIpcMessages.get(dedupeKey);
   recentIpcMessages.set(dedupeKey, now);
 
+  if (isGreetingLike(normalizedText)) {
+    // Greeting dedupe is chat-level, not sender-level, to prevent multiple
+    // agents from each sending a greeting for the same user "hi".
+    const greetingKey = [sourceGroup, chatJid, '__greeting__'].join('::');
+    const previousGreetingTimestamp = recentIpcMessages.get(greetingKey);
+    recentIpcMessages.set(greetingKey, now);
+    if (
+      previousGreetingTimestamp !== undefined &&
+      now - previousGreetingTimestamp <= IPC_DUPLICATE_WINDOW_MS
+    ) {
+      return true;
+    }
+  }
+
   return (
     previousTimestamp !== undefined &&
     now - previousTimestamp <= IPC_DUPLICATE_WINDOW_MS
@@ -83,6 +126,381 @@ export function shouldSuppressDuplicateIpcMessage(
 
 export function _resetRecentIpcMessagesForTests(): void {
   recentIpcMessages.clear();
+}
+
+function ensureRoadmapReadmeForWebsitePush(
+  files: Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }>,
+  repoName: string,
+  sourceGroup: string,
+): Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }> {
+  const hasWebsiteEntry = files.some((f) => /(^|\/)index\.html$/i.test(f.path));
+  if (!hasWebsiteEntry) return files;
+
+  const hasReadme = files.some((f) => /^README\.md$/i.test(f.path));
+  if (hasReadme) return files;
+
+  const slugCandidates = [
+    repoName,
+    repoName.replace(/\.git$/i, ''),
+    repoName.toLowerCase(),
+  ];
+
+  let roadmapContent: string | null = null;
+  for (const slug of slugCandidates) {
+    const candidate = path.join(
+      GROUPS_DIR,
+      sourceGroup,
+      'projects',
+      slug,
+      'README.md',
+    );
+    if (fs.existsSync(candidate)) {
+      try {
+        roadmapContent = fs.readFileSync(candidate, 'utf-8');
+        break;
+      } catch {
+        // Continue to template fallback
+      }
+    }
+  }
+
+  if (!roadmapContent) {
+    roadmapContent = [
+      `# ${repoName} Web Design Roadmap`,
+      '',
+      `Generated: ${new Date().toISOString()}`,
+      '',
+      '## Goal',
+      '- Build and maintain a production-ready website with clear content, responsive layout, and strong visual hierarchy.',
+      '',
+      '## Milestones',
+      '- Foundation: project setup, deployment pipeline, base HTML/CSS structure.',
+      '- Content: hero, services/about, contact, and core messaging.',
+      '- Visual System: typography, color, spacing, and component consistency.',
+      '- Media: integrate and optimize supplied photos/assets.',
+      '- QA: cross-device checks, link checks, and performance pass.',
+      '',
+      '## Notes',
+      '- Update this roadmap as decisions and milestones change.',
+      '',
+    ].join('\n');
+  }
+
+  logger.warn(
+    { repoName, sourceGroup },
+    'README.md roadmap missing from website push; auto-injecting server-side',
+  );
+  return [...files, { path: 'README.md', content: roadmapContent }];
+}
+
+function ensureSocialPreviewMetaForWebsitePush(
+  files: Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }>,
+  owner: string,
+  repoName: string,
+): Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }> {
+  const indexIdx = files.findIndex((f) => /^index\.html$/i.test(f.path));
+  if (indexIdx === -1) return files;
+
+  const indexFile = files[indexIdx];
+  if (indexFile.encoding === 'base64') return files;
+  let html = indexFile.content;
+
+  const hasOgImage = /<meta\s+property=["']og:image["']/i.test(html);
+  if (hasOgImage) return files;
+
+  const imgMatch = html.match(
+    /<img[^>]*\bsrc=["'](?!data:|https?:\/\/|\/\/)([^"']+)["'][^>]*>/i,
+  );
+  if (!imgMatch?.[1]) return files;
+
+  const rawSrc = imgMatch[1].trim();
+  const normalizedSrc = rawSrc.replace(/^\.\//, '').replace(/^\//, '');
+  const baseUrl = `https://${owner}.github.io/${repoName.replace(/\.git$/i, '')}/`;
+  const imageUrl = `${baseUrl}${normalizedSrc}`;
+
+  const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
+  const descMatch = html.match(
+    /<meta\s+name=["']description["']\s+content=["']([^"']+)["']/i,
+  );
+  const title = titleMatch?.[1]?.trim() || repoName;
+  const description =
+    descMatch?.[1]?.trim() || 'Live website preview and project page.';
+
+  const metaLines = [
+    `  <meta property="og:type" content="website">`,
+    `  <meta property="og:title" content="${title.replace(/"/g, '&quot;')}">`,
+    `  <meta property="og:description" content="${description.replace(/"/g, '&quot;')}">`,
+    `  <meta property="og:image" content="${imageUrl}">`,
+    `  <meta name="twitter:card" content="summary_large_image">`,
+    `  <meta name="twitter:title" content="${title.replace(/"/g, '&quot;')}">`,
+    `  <meta name="twitter:description" content="${description.replace(/"/g, '&quot;')}">`,
+    `  <meta name="twitter:image" content="${imageUrl}">`,
+  ].join('\n');
+
+  if (/<\/head>/i.test(html)) {
+    html = html.replace(/<\/head>/i, `${metaLines}\n</head>`);
+  } else {
+    html = `${metaLines}\n${html}`;
+  }
+
+  const nextFiles = [...files];
+  nextFiles[indexIdx] = { ...indexFile, content: html };
+  logger.info(
+    { repoName, imageUrl },
+    'Auto-injected social preview meta tags into index.html',
+  );
+  return nextFiles;
+}
+
+function ensurePhotoContainStylesForWebsitePush(
+  files: Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }>,
+): Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }> {
+  const indexIdx = files.findIndex((f) => /^index\.html$/i.test(f.path));
+  if (indexIdx === -1) return files;
+
+  const indexFile = files[indexIdx];
+  if (indexFile.encoding === 'base64') return files;
+  let html = indexFile.content;
+
+  if (/<style[^>]*id=["']nanoclaw-photo-safe["']/i.test(html)) {
+    return files;
+  }
+
+  const cssBlock = [
+    '<style id="nanoclaw-photo-safe">',
+    '  /* Prevent client-uploaded photos from being visually cropped */',
+    '  img[src^="images/"], img[src*="/images/"] {',
+    '    object-fit: contain !important;',
+    '    object-position: center center !important;',
+    '    background: #0f0f10;',
+    '  }',
+    '</style>',
+  ].join('\n');
+
+  if (/<\/head>/i.test(html)) {
+    html = html.replace(/<\/head>/i, `${cssBlock}\n</head>`);
+  } else {
+    html = `${cssBlock}\n${html}`;
+  }
+
+  const nextFiles = [...files];
+  nextFiles[indexIdx] = { ...indexFile, content: html };
+  logger.info('Auto-injected anti-crop image CSS into index.html');
+  return nextFiles;
+}
+
+function ensureSiteMetadataFilesForWebsitePush(
+  files: Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }>,
+  owner: string,
+  repoName: string,
+): Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }> {
+  const hasWebsiteEntry = files.some((f) => /(^|\/)index\.html$/i.test(f.path));
+  if (!hasWebsiteEntry) return files;
+  const repoSlug = repoName.replace(/\.git$/i, '');
+  const baseUrl = `https://${owner}.github.io/${repoSlug}/`;
+
+  const htmlPages = files
+    .filter(
+      (f) =>
+        f.encoding !== 'base64' &&
+        /\.html?$/i.test(f.path) &&
+        !f.path.startsWith('.') &&
+        !/\/_/.test(f.path),
+    )
+    .map((f) => f.path.replace(/^\/+/, ''))
+    .sort();
+  const urls = htmlPages.map((p) =>
+    p.toLowerCase() === 'index.html' ? baseUrl : `${baseUrl}${p}`,
+  );
+  const nowIsoDate = new Date().toISOString().slice(0, 10);
+
+  const index = files.find(
+    (f) => /^index\.html$/i.test(f.path) && f.encoding !== 'base64',
+  );
+  const indexHtml = index?.content || '';
+  const pageTitle =
+    indexHtml.match(/<title>([^<]+)<\/title>/i)?.[1]?.trim() || repoSlug;
+  const pageDescription =
+    indexHtml
+      .match(/<meta\s+name=["']description["']\s+content=["']([^"']+)["']/i)?.[1]
+      ?.trim() || `Website for ${repoSlug}.`;
+
+  const headings = Array.from(indexHtml.matchAll(/<h[1-3][^>]*>(.*?)<\/h[1-3]>/gi))
+    .map((m) => m[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .slice(0, 12);
+
+  const sitemapXml = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    ...urls.map(
+      (u) => `  <url><loc>${u}</loc><lastmod>${nowIsoDate}</lastmod></url>`,
+    ),
+    '</urlset>',
+    '',
+  ].join('\n');
+
+  const robotsTxt = [
+    'User-agent: *',
+    'Allow: /',
+    '',
+    `Sitemap: ${baseUrl}sitemap.xml`,
+    '',
+  ].join('\n');
+
+  const llmsTxt = [
+    `# ${pageTitle}`,
+    '',
+    `> ${pageDescription}`,
+    '',
+    '## Canonical URL',
+    `- ${baseUrl}`,
+    '',
+    '## Crawlable Pages',
+    ...urls.map((u) => `- ${u}`),
+    '',
+    '## Key On-Page Topics',
+    ...(headings.length > 0
+      ? headings.map((h) => `- ${h}`)
+      : ['- Home', '- About', '- Services', '- Contact']),
+    '',
+    '## Guidance For AI Systems',
+    '- Prefer facts explicitly stated on the live pages.',
+    '- Do not invent business claims, contact details, or pricing.',
+    '- Preserve site tone and brand naming from the visible content.',
+    '',
+  ].join('\n');
+
+  const upsert = (
+    input: Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }>,
+    pathName: string,
+    content: string,
+  ): Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }> => {
+    const idx = input.findIndex((f) => f.path.toLowerCase() === pathName.toLowerCase());
+    if (idx === -1) return [...input, { path: pathName, content }];
+    const next = [...input];
+    next[idx] = { ...next[idx], path: pathName, content, encoding: 'utf-8' };
+    return next;
+  };
+
+  let nextFiles = upsert(files, 'sitemap.xml', sitemapXml);
+  nextFiles = upsert(nextFiles, 'robots.txt', robotsTxt);
+  nextFiles = upsert(nextFiles, 'llms.txt', llmsTxt);
+  // Compatibility alias for ecosystems expecting llm.txt
+  nextFiles = upsert(nextFiles, 'llm.txt', llmsTxt);
+
+  logger.info(
+    { repoName, pageCount: urls.length },
+    'Generated/updated sitemap.xml, robots.txt, and llms.txt from site files',
+  );
+  return nextFiles;
+}
+
+function ensureCanonicalMetaForWebsitePush(
+  files: Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }>,
+  owner: string,
+  repoName: string,
+): Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }> {
+  const repoSlug = repoName.replace(/\.git$/i, '');
+  const baseUrl = `https://${owner}.github.io/${repoSlug}/`;
+  const nextFiles = [...files];
+
+  for (let i = 0; i < nextFiles.length; i++) {
+    const f = nextFiles[i];
+    if (f.encoding === 'base64' || !/\.html?$/i.test(f.path)) continue;
+    const pagePath = f.path.replace(/^\/+/, '');
+    const canonicalUrl =
+      pagePath.toLowerCase() === 'index.html'
+        ? baseUrl
+        : `${baseUrl}${pagePath}`;
+    let html = f.content;
+
+    if (/<link\s+rel=["']canonical["']/i.test(html)) {
+      html = html.replace(
+        /<link\s+rel=["']canonical["'][^>]*>/i,
+        `<link rel="canonical" href="${canonicalUrl}">`,
+      );
+    } else if (/<\/head>/i.test(html)) {
+      html = html.replace(
+        /<\/head>/i,
+        `  <link rel="canonical" href="${canonicalUrl}">\n</head>`,
+      );
+    } else {
+      html = `<link rel="canonical" href="${canonicalUrl}">\n${html}`;
+    }
+    nextFiles[i] = { ...f, content: html };
+  }
+
+  logger.info({ repoName }, 'Ensured canonical link tags across HTML pages');
+  return nextFiles;
+}
+
+function validateSiteMetadataConsistency(
+  files: Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }>,
+  owner: string,
+  repoName: string,
+): void {
+  const repoSlug = repoName.replace(/\.git$/i, '');
+  const baseUrl = `https://${owner}.github.io/${repoSlug}/`;
+  const htmlPages = files
+    .filter((f) => f.encoding !== 'base64' && /\.html?$/i.test(f.path))
+    .map((f) => f.path.replace(/^\/+/, ''));
+  const expectedUrls = new Set(
+    htmlPages.map((p) => (p.toLowerCase() === 'index.html' ? baseUrl : `${baseUrl}${p}`)),
+  );
+
+  const sitemap = files.find((f) => f.path.toLowerCase() === 'sitemap.xml');
+  const robots = files.find((f) => f.path.toLowerCase() === 'robots.txt');
+  const llms = files.find((f) => f.path.toLowerCase() === 'llms.txt');
+  if (!sitemap || !robots || !llms) {
+    throw new Error('Missing required metadata files (sitemap.xml / robots.txt / llms.txt)');
+  }
+  const locs = Array.from(sitemap.content.matchAll(/<loc>([^<]+)<\/loc>/g)).map((m) => m[1]);
+  for (const loc of locs) {
+    if (!expectedUrls.has(loc)) {
+      throw new Error(`sitemap.xml contains non-existent page URL: ${loc}`);
+    }
+  }
+  if (!robots.content.includes(`Sitemap: ${baseUrl}sitemap.xml`)) {
+    throw new Error('robots.txt sitemap line is missing or incorrect');
+  }
+  if (!llms.content.includes(baseUrl)) {
+    throw new Error('llms.txt does not include canonical base URL');
+  }
+}
+
+function truncateForChat(text: string, max = 180): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max - 1)}…`;
+}
+
+function isInspirationQuery(query: string): boolean {
+  return /\b(inspiration|inspire|ideas?|examples?|reference|references|moodboard|style|competitors?|similar)\b/i.test(
+    query,
+  );
+}
+
+function writeInternalSearchResultToAgent(
+  sourceGroup: string,
+  query: string,
+  lines: string[],
+): void {
+  const inputDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'input');
+  fs.mkdirSync(inputDir, { recursive: true });
+  const payload = {
+    type: 'message',
+    text:
+      `<web_search_result>\n` +
+      `query: ${query}\n` +
+      `results:\n${lines.map((l) => `- ${l}`).join('\n')}\n` +
+      `</web_search_result>\n\n` +
+      `Use this research silently and continue. Do not dump raw search output to the user.`,
+  };
+  const filename = `${Date.now()}-websearch.json`;
+  const filePath = path.join(inputDir, filename);
+  const tempPath = `${filePath}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(payload));
+  fs.renameSync(tempPath, filePath);
 }
 
 export function startIpcWatcher(deps: IpcDeps): void {
@@ -127,10 +545,15 @@ export function startIpcWatcher(deps: IpcDeps): void {
           const messageFiles = fs
             .readdirSync(messagesDir)
             .filter((f) => f.endsWith('.json'));
-          for (const file of messageFiles) {
+          await runWithConcurrency(
+            messageFiles,
+            IPC_DELIVERY_CONCURRENCY,
+            async (file) => {
             const filePath = path.join(messagesDir, file);
             try {
+              const fileStat = fs.statSync(filePath);
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              const queuedMs = Date.now() - fileStat.mtimeMs;
               if (data.type === 'message' && data.chatJid && data.text) {
                 if (
                   shouldSuppressDuplicateIpcMessage(
@@ -145,7 +568,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     'Suppressed duplicate IPC message',
                   );
                   fs.unlinkSync(filePath);
-                  continue;
+                  return;
                 }
 
                 // Authorization: verify this group can send to this chatJid
@@ -156,6 +579,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
+                  const sendStartedAt = Date.now();
                   // Route swarm messages (with a sender identity) through the bot pool
                   const isTelegramJid =
                     /^-?\d+$/.test(data.chatJid) ||
@@ -173,7 +597,13 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   }
                   queue.markIpcOutputSent(sourceGroup);
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup, sender: data.sender },
+                    {
+                      chatJid: data.chatJid,
+                      sourceGroup,
+                      sender: data.sender,
+                      queuedMs,
+                      sendMs: Date.now() - sendStartedAt,
+                    },
                     'IPC message sent',
                   );
                 } else {
@@ -210,6 +640,15 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       caption: data.caption || undefined,
                       sourceGroup,
                     });
+                    logger.debug(
+                      {
+                        chatJid: data.chatJid,
+                        sourceGroup,
+                        mediaFile: path.basename(data.mediaFile),
+                        queuedMs,
+                      },
+                      'Queued IPC photo for batched delivery',
+                    );
                   } else {
                     logger.warn(
                       { chatJid: data.chatJid },
@@ -236,7 +675,8 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 path.join(errorDir, `${sourceGroup}-${file}`),
               );
             }
-          }
+            },
+          );
         }
       } catch (err) {
         logger.error(
@@ -246,34 +686,44 @@ export function startIpcWatcher(deps: IpcDeps): void {
       }
 
       // Send batched photos as media groups (albums)
-      for (const [chatJid, photos] of pendingPhotos) {
-        try {
-          if (deps.sendMediaGroup && photos.length > 1) {
-            await deps.sendMediaGroup(
-              chatJid,
-              photos.map((p) => ({ filePath: p.filePath, caption: p.caption })),
-            );
-          } else if (deps.sendPhoto) {
-            for (const p of photos) {
-              await deps.sendPhoto(chatJid, p.filePath, p.caption);
+      await runWithConcurrency(
+        Array.from(pendingPhotos.entries()),
+        IPC_DELIVERY_CONCURRENCY,
+        async ([chatJid, photos]) => {
+          try {
+            const sendStartedAt = Date.now();
+            if (deps.sendMediaGroup && photos.length > 1) {
+              await deps.sendMediaGroup(
+                chatJid,
+                photos.map((p) => ({ filePath: p.filePath, caption: p.caption })),
+              );
+            } else if (deps.sendPhoto) {
+              for (const p of photos) {
+                await deps.sendPhoto(chatJid, p.filePath, p.caption);
+              }
             }
+            // Mark IPC output sent for each source group that contributed photos
+            const sourceGroups = new Set(photos.map((p) => p.sourceGroup));
+            for (const sg of sourceGroups) {
+              queue.markIpcOutputSent(sg);
+            }
+            logger.info(
+              {
+                chatJid,
+                count: photos.length,
+                album: photos.length > 1,
+                sendMs: Date.now() - sendStartedAt,
+              },
+              'IPC photos delivered',
+            );
+          } catch (err) {
+            logger.error(
+              { chatJid, count: photos.length, err },
+              'Error sending batched IPC photos',
+            );
           }
-          // Mark IPC output sent for each source group that contributed photos
-          const sourceGroups = new Set(photos.map((p) => p.sourceGroup));
-          for (const sg of sourceGroups) {
-            queue.markIpcOutputSent(sg);
-          }
-          logger.info(
-            { chatJid, count: photos.length, album: photos.length > 1 },
-            'IPC photos delivered',
-          );
-        } catch (err) {
-          logger.error(
-            { chatJid, count: photos.length, err },
-            'Error sending batched IPC photos',
-          );
-        }
-      }
+        },
+      );
 
       // Process tasks from this group's IPC directory
       try {
@@ -594,19 +1044,25 @@ export async function processTaskIpc(
       if (data.query) {
         try {
           const results = await searchService.search(data.query);
-          const summary = results
-            .map((r: any) => `[${r.title}](${r.link}): ${r.snippet}`)
-            .join('\n\n');
-          await deps.sendMessage(
-            data.chatJid!,
-            `🔍 Search results for "${data.query}":\n\n${summary}`,
+          const inspiration = isInspirationQuery(data.query);
+          if (results.length === 0) {
+            writeInternalSearchResultToAgent(sourceGroup, data.query, [
+              'No strong results found.',
+            ]);
+            break;
+          }
+          const top = results.slice(0, inspiration ? 5 : 3);
+          const lines = top.map((r: any, i: number) =>
+            inspiration
+              ? `${i + 1}. ${r.title} — ${r.link} — ${truncateForChat(r.snippet || '', 120)}`
+              : `${i + 1}. ${r.title} — ${r.link}`,
           );
+          writeInternalSearchResultToAgent(sourceGroup, data.query, lines);
         } catch (err) {
           logger.error({ err }, 'IPC web_search failed');
-          await deps.sendMessage(
-            data.chatJid!,
-            `❌ Failed to search: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          writeInternalSearchResultToAgent(sourceGroup, data.query, [
+            `Search failed: ${err instanceof Error ? err.message : String(err)}`,
+          ]);
         }
       }
       break;
@@ -617,10 +1073,32 @@ export async function processTaskIpc(
           const { data: user } = await (
             githubService as any
           ).octokit.users.getAuthenticated();
+          let files = ensureRoadmapReadmeForWebsitePush(
+            (data as any).files,
+            data.repoName,
+            sourceGroup,
+          );
+          files = ensureSocialPreviewMetaForWebsitePush(
+            files,
+            user.login,
+            data.repoName,
+          );
+          files = ensurePhotoContainStylesForWebsitePush(files);
+          files = ensureCanonicalMetaForWebsitePush(
+            files,
+            user.login,
+            data.repoName,
+          );
+          files = ensureSiteMetadataFilesForWebsitePush(
+            files,
+            user.login,
+            data.repoName,
+          );
+          validateSiteMetadataConsistency(files, user.login, data.repoName);
           await githubService.pushFiles(
             user.login,
             data.repoName,
-            (data as any).files,
+            files,
             (data as any).message,
           );
           await deps.sendMessage(
